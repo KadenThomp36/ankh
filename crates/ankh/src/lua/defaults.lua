@@ -141,6 +141,13 @@ map("decks", "R", "refresh", { desc = "refresh" })
 map("decks", "/", "browse_deck", { desc = "browse this deck" })
 map("decks", "b", "open_browser", { desc = "browser" })
 map("decks", "a", "add_note", { desc = "add note to deck" })
+map("decks", "s", "stats", { desc = "stats for deck" })
+map("decks", "<leader>S", "stats_all", { desc = "stats for everything" })
+map("decks", "o", "deck_options", { desc = "deck options in $EDITOR" })
+map("decks", "n", "new_deck", { desc = "new deck" })
+map("decks", "r", "rename_deck", { desc = "rename deck" })
+map("decks", "D", "delete_deck", { desc = "delete deck" })
+map("decks", "<leader>f", "fsrs_optimize", { desc = "optimise FSRS parameters" })
 
 -- review
 map("review", "<Space>", "continue", { desc = "show answer / good" })
@@ -167,6 +174,7 @@ map("review", "<C-u>", "scroll_up", { desc = "scroll up" })
 map("review", "/", "browse_deck", { desc = "browse this deck" })
 map("review", "<leader>e", "edit_note", { desc = "edit note in $EDITOR" })
 map("review", "<leader>a", "add_note", { desc = "add note to deck" })
+map("review", "<leader>s", "stats", { desc = "stats for deck" })
 for n = 0, 7 do
   local names = { "clear flag", "flag red", "flag orange", "flag green", "flag blue", "flag pink", "flag turquoise", "flag purple" }
   map("review", "<leader>" .. n, "flag " .. n, { desc = names[n + 1] })
@@ -200,6 +208,12 @@ map("browser", "F", "confirm_forget", { desc = "forget (reset to new)" })
 map("browser", "o", "cycle_sort", { desc = "next sort column" })
 map("browser", "O", "reverse_sort", { desc = "reverse sort" })
 map("browser", "<BS>", "back", { desc = "back to decks" })
+map("browser", "<leader>s", "stats", { desc = "stats for this search" })
+
+-- stats
+map("stats", "<BS>", "back", { desc = "back to decks" })
+map("stats", "<C-d>", "down", { desc = "scroll down" })
+map("stats", "<C-u>", "up", { desc = "scroll up" })
 for n = 0, 7 do
   local names = { "clear flag", "flag red", "flag orange", "flag green", "flag blue", "flag pink", "flag turquoise", "flag purple" }
   map("browser", "<leader>" .. n, "bulk_flag " .. n, { desc = names[n + 1] })

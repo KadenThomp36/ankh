@@ -139,16 +139,60 @@ pub enum Command {
         #[arg(long, short, value_name = "PATH")]
         file: Option<String>,
     },
-    /// Export matching notes as a note file (git-able Markdown)
+    /// Export notes as a note file (Markdown), or an .apkg with --apkg
     Export {
         /// Anki search; default: everything
         query: Vec<String>,
         /// Write to a file instead of stdout
         #[arg(long, short, value_name = "PATH")]
         out: Option<PathBuf>,
+        /// Write an Anki package instead of Markdown (requires --out)
+        #[arg(long)]
+        apkg: bool,
+        /// Include scheduling information in the .apkg
+        #[arg(long)]
+        with_scheduling: bool,
+        /// Leave media out of the .apkg
+        #[arg(long)]
+        no_media: bool,
     },
-    /// Import a note file: notes with `note:` ids are updated, others added
-    Import { path: PathBuf },
+    /// Import a note file (.md), an Anki package (.apkg) or a CSV/TSV
+    Import {
+        path: PathBuf,
+        /// CSV only: notetype whose fields the columns map to, in order
+        #[arg(long, short)]
+        notetype: Option<String>,
+        /// CSV only: deck to import into
+        #[arg(long, short)]
+        deck: Option<String>,
+    },
+    /// Create, rename or delete decks
+    Deck {
+        #[command(subcommand)]
+        op: DeckOp,
+    },
+    /// Show or edit a deck's options preset (TOML)
+    Options {
+        deck: String,
+        /// Open the options in $EDITOR
+        #[arg(long, short)]
+        edit: bool,
+        /// Turn FSRS on or off for the collection
+        #[arg(long, value_name = "on|off")]
+        fsrs: Option<String>,
+    },
+    /// Optimise FSRS parameters for a deck's preset from its review history
+    Fsrs {
+        #[command(subcommand)]
+        op: FsrsOp,
+    },
+    /// Statistics for a deck (or the whole collection)
+    Stats {
+        deck: Option<String>,
+        /// Days of history for per-day series
+        #[arg(long, default_value_t = 365)]
+        days: u32,
+    },
     /// List notetypes and their fields
     Notetypes,
     /// Show config paths, or dump the built-in defaults.lua
@@ -166,6 +210,26 @@ pub enum Command {
         #[arg(long, default_value_t = 10)]
         secs: u32,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DeckOp {
+    /// Create a deck (`Parent::Child` nests)
+    Create { name: String },
+    /// Rename a deck (moves it if the new name has a different parent)
+    Rename { name: String, new_name: String },
+    /// Delete a deck, its subdecks and all their cards
+    Delete {
+        name: String,
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum FsrsOp {
+    /// Compute and store optimal parameters for the deck's preset
+    Optimize { deck: String },
 }
 
 fn main() {

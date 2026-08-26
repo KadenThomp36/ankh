@@ -28,7 +28,7 @@ Early. Milestones, in order:
 - [x] **4 · browser** — Anki search syntax, sortable table, question/answer preview, card info + review log, visual-mode bulk ops (suspend/bury/flag/mark/tag/move/due/forget/delete), `ankh search` / `ankh card` / `ankh bulk`
 - [x] **5 · editor** — notes as Markdown + frontmatter in `$EDITOR` (lossless: un-round-trippable HTML stays raw), batch add, `ankh export`/`import` for git-able decks, nvim ftplugin
 - [x] **6 · Lua** — embedded Lua 5.4: `init.lua`, `ankh.setup`, keymaps to actions or functions, events, `:Commands`, `:lua`, read/act API, plugins on `package.path`, six themes
-- [ ] **7 · management** — deck options/FSRS, stats, import/export
+- [x] **7 · management** — deck create/rename/delete, options preset as TOML in `$EDITOR`, FSRS optimise, stats view (calendar heatmap, forecast, counts, answers, hours, intervals), `.apkg` export/import, CSV import
 - [ ] **8 · polish** — `:help`, themes, release binaries
 
 ## Install
@@ -69,7 +69,14 @@ ankh add -d Inbox "front" "back"          # or just `ankh add` to open $EDITOR
 ankh edit 1633756077719                   # note as Markdown in $EDITOR
 ankh export 'deck:Korean::Mining' -o mining.md && git add mining.md
 ankh import mining.md                     # ids update, new entries add
+ankh export 'deck:Korean' --apkg -o korean.apkg && ankh import shared.apkg
+ankh import words.tsv --notetype Basic --deck Inbox
+ankh deck create "Korean::Mining"; ankh options Korean --edit; ankh fsrs optimize Korean
+ankh stats Korean --format json | jq .forecast
 ```
+
+Decks view: `s` stats, `o` options in `$EDITOR`, `n`/`r`/`D` new/rename/delete,
+`<Space>f` optimise FSRS.
 
 Editing: `e` in the browser or `<Space>e` while reviewing opens the note in
 `$EDITOR`; `a` adds a note to the current deck. See `docs/adr/0005-note-files.md`

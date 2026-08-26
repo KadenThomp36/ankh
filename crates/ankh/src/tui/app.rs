@@ -22,6 +22,7 @@ use super::theme::Theme;
 use super::views::browser::BrowserView;
 use super::views::decks::DecksView;
 use super::views::review::{ReviewView, Stage};
+use super::views::stats::StatsView;
 use crate::lua::{Config, Request, Runtime, Snapshot};
 use ankh_core::{Av, Rating};
 
@@ -86,6 +87,14 @@ pub enum Action {
     StudyCard,
     EditNote,
     AddNote,
+    // management
+    Stats,
+    StatsAll,
+    DeckOptions,
+    PromptNewDeck,
+    PromptRenameDeck,
+    ConfirmDeleteDeck,
+    FsrsOptimize,
     /// A Lua function registered through `ankh.keymap.set`.
     Lua(usize),
 }
@@ -160,6 +169,13 @@ impl Action {
             "study_card" => Action::StudyCard,
             "edit_note" => Action::EditNote,
             "add_note" => Action::AddNote,
+            "stats" => Action::Stats,
+            "stats_all" => Action::StatsAll,
+            "deck_options" => Action::DeckOptions,
+            "new_deck" => Action::PromptNewDeck,
+            "rename_deck" => Action::PromptRenameDeck,
+            "delete_deck" => Action::ConfirmDeleteDeck,
+            "fsrs_optimize" => Action::FsrsOptimize,
             _ => return None,
         })
     }
@@ -228,6 +244,7 @@ impl Action {
 enum EditRequest {
     Existing { note_id: i64 },
     New { deck: String },
+    Options { deck: ankh_core::DeckId },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -235,6 +252,7 @@ pub enum View {
     Decks,
     Review,
     Browser,
+    Stats,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,6 +273,9 @@ pub enum PromptKind {
     SetDue,
     ConfirmDelete(usize),
     ConfirmForget(usize),
+    NewDeck,
+    RenameDeck(ankh_core::DeckId, String),
+    ConfirmDeleteDeck(ankh_core::DeckId, String, u32),
 }
 
 impl PromptKind {
@@ -268,6 +289,9 @@ impl PromptKind {
                 format!("delete {n} note{} and all their cards? (y/N) ", if *n == 1 { "" } else { "s" })
             }
             PromptKind::ConfirmForget(n) => format!("reset {n} card{} to new? (y/N) ", if *n == 1 { "" } else { "s" }),
+            PromptKind::NewDeck => "new deck (Parent::Child nests): ".into(),
+            PromptKind::RenameDeck(_, _) => "rename deck to: ".into(),
+            PromptKind::ConfirmDeleteDeck(_, name, n) => format!("delete {name} and its {n} cards? (y/N) "),
         }
     }
 }
@@ -314,6 +338,7 @@ pub struct App {
     decks: DecksView,
     review: Option<ReviewView>,
     browser: Option<BrowserView>,
+    stats: Option<StatsView>,
     audio: Player,
     images: Images,
     keymaps: HashMap<View, Keymap<Action>>,
@@ -359,6 +384,7 @@ impl App {
             decks: DecksView::default(),
             review: None,
             browser: None,
+            stats: None,
             audio,
             images,
             keymaps,
@@ -541,6 +567,17 @@ impl App {
                 self.after_edit();
                 Ok(format!("saved note {note_id}{}", if r.updated == 1 { "" } else { " (+ more)" }))
             }
+            EditRequest::Options { deck } => {
+                let (opts, info) = self.eng().deck_options(deck).map_err(|e| e.to_string())?;
+                let text = opts.to_toml(&info);
+                let Some(edited) = editor::edit_text(&text, "options").map_err(|e| e.to_string())? else {
+                    return Ok("no changes".into());
+                };
+                let new = ankh_core::DeckOptions::from_toml(&edited).map_err(|e| e.to_string())?;
+                self.eng().save_deck_options(deck, &new).map_err(|e| e.to_string())?;
+                self.refresh();
+                Ok(format!("saved preset {:?}", new.preset))
+            }
             EditRequest::New { deck } => {
                 let text = editor::new_note_template(&mut self.eng(), None, &deck).map_err(|e| e.to_string())?;
                 let Some(edited) = editor::edit_text(&text, "new").map_err(|e| e.to_string())? else {
@@ -583,7 +620,7 @@ impl App {
                     b.refresh(&mut engine.borrow_mut());
                 }
             }
-            View::Decks => self.refresh(),
+            View::Decks | View::Stats => self.refresh(),
         }
     }
 
@@ -595,6 +632,7 @@ impl App {
                 View::Decks => "decks",
                 View::Review => "review",
                 View::Browser => "browser",
+                View::Stats => "stats",
             }
             .into(),
             mode: self.mode.label().to_lowercase(),
@@ -604,6 +642,7 @@ impl App {
                 View::Decks => self.decks.selected_deck().map(|d| d.full_name.clone()),
                 View::Review => self.review.as_ref().map(|r| r.deck_name.clone()),
                 View::Browser => self.browser.as_ref().and_then(|b| b.current().map(|r| r.deck.clone())),
+                View::Stats => None,
             },
         }
     }
@@ -824,7 +863,10 @@ impl App {
             KeyCode::Char('u') if key.mods.contains(KeyModifiers::CONTROL) => self.cmdline.clear(),
             KeyCode::Char(c) if !key.mods.contains(KeyModifiers::CONTROL) => {
                 // Confirmations take a single key.
-                if matches!(kind, PromptKind::ConfirmDelete(_) | PromptKind::ConfirmForget(_)) {
+                if matches!(
+                    kind,
+                    PromptKind::ConfirmDelete(_) | PromptKind::ConfirmForget(_) | PromptKind::ConfirmDeleteDeck(..)
+                ) {
                     self.mode = Mode::Normal;
                     self.cmdline.clear();
                     if c == 'y' || c == 'Y' {
@@ -841,6 +883,48 @@ impl App {
     }
 
     fn finish_prompt(&mut self, kind: PromptKind, text: &str) {
+        match kind {
+            PromptKind::NewDeck => {
+                if text.is_empty() {
+                    return;
+                }
+                let r = self.eng().create_deck(text);
+                match r {
+                    Ok(_) => {
+                        self.info(format!("created {text}"));
+                        self.refresh();
+                    }
+                    Err(e) => self.error(e.to_string()),
+                }
+                return;
+            }
+            PromptKind::RenameDeck(id, old) => {
+                if text.is_empty() || text == old {
+                    return;
+                }
+                let r = self.eng().rename_deck(id, text);
+                match r {
+                    Ok(()) => {
+                        self.info(format!("renamed {old} → {text}"));
+                        self.refresh();
+                    }
+                    Err(e) => self.error(e.to_string()),
+                }
+                return;
+            }
+            PromptKind::ConfirmDeleteDeck(id, name, _) => {
+                let r = self.eng().delete_deck(id);
+                match r {
+                    Ok(n) => {
+                        self.info(format!("deleted {name} ({n} cards)"));
+                        self.refresh();
+                    }
+                    Err(e) => self.error(e.to_string()),
+                }
+                return;
+            }
+            _ => {}
+        }
         let Some(b) = self.browser.as_ref() else { return };
         let cids = b.targets();
         if cids.is_empty() {
@@ -890,6 +974,7 @@ impl App {
                     self.eng().forget_cards(&cids)?;
                     format!("reset {} card{} to new", cids.len(), plural(cids.len()))
                 }
+                _ => unreachable!("deck prompts handled above"),
             })
         })();
         match res {
@@ -902,7 +987,9 @@ impl App {
     }
 
     fn prompt(&mut self, kind: PromptKind) {
-        if self.view != View::Browser {
+        let deck_prompt =
+            matches!(kind, PromptKind::NewDeck | PromptKind::RenameDeck(..) | PromptKind::ConfirmDeleteDeck(..));
+        if self.view != View::Browser && !deck_prompt {
             return;
         }
         self.cmdline.clear();
@@ -1091,6 +1178,27 @@ impl App {
             ("info", _) => self.dispatch(Action::CardInfo),
             ("edit" | "e", _) => self.dispatch(Action::EditNote),
             ("add" | "a", _) => self.dispatch(Action::AddNote),
+            ("stats", Some("all")) => self.dispatch(Action::StatsAll),
+            ("stats", _) => self.dispatch(Action::Stats),
+            ("options" | "o", _) => self.dispatch(Action::DeckOptions),
+            ("fsrs", Some("optimize" | "optimise")) => self.dispatch(Action::FsrsOptimize),
+            ("fsrs", Some("on" | "off")) => {
+                let on = arg == Some("on");
+                let deck = self.decks.selected_deck().map(|d| d.id);
+                match deck {
+                    Some(id) => {
+                        let r = self.eng().set_fsrs_enabled(id, on);
+                        match r {
+                            Ok(()) => self.info(format!("FSRS {}", if on { "enabled" } else { "disabled" })),
+                            Err(e) => self.error(e.to_string()),
+                        }
+                    }
+                    None => self.info("select a deck first"),
+                }
+            }
+            ("deck", Some("create" | "new")) => self.dispatch(Action::PromptNewDeck),
+            ("deck", Some("rename")) => self.dispatch(Action::PromptRenameDeck),
+            ("deck", Some("delete")) => self.dispatch(Action::ConfirmDeleteDeck),
             ("lua", _) => {
                 let code = cmd.split_once(' ').map(|x| x.1).unwrap_or("");
                 self.lua.set_snapshot(self.snapshot());
@@ -1122,6 +1230,11 @@ impl App {
                     self.leave_review();
                     return;
                 }
+                if self.view == View::Stats {
+                    self.view = View::Decks;
+                    self.stats = None;
+                    return;
+                }
                 if self.view == View::Browser {
                     if self.browser.as_ref().map(|b| b.info.is_some()).unwrap_or(false) {
                         self.browser.as_mut().unwrap().info = None;
@@ -1150,6 +1263,11 @@ impl App {
                         b.move_by(1);
                     }
                 }
+                View::Stats => {
+                    if let Some(s) = self.stats.as_mut() {
+                        s.scroll = s.scroll.saturating_add(1);
+                    }
+                }
             },
             Action::Up => match self.view {
                 View::Decks => self.decks.move_by(-1),
@@ -1157,6 +1275,11 @@ impl App {
                 View::Browser => {
                     if let Some(b) = self.browser.as_mut() {
                         b.move_by(-1);
+                    }
+                }
+                View::Stats => {
+                    if let Some(s) = self.stats.as_mut() {
+                        s.scroll = s.scroll.saturating_sub(1);
                     }
                 }
             },
@@ -1172,6 +1295,11 @@ impl App {
                         b.selected = 0;
                     }
                 }
+                View::Stats => {
+                    if let Some(s) = self.stats.as_mut() {
+                        s.scroll = 0;
+                    }
+                }
             },
             Action::Bottom => match self.view {
                 View::Decks => self.decks.go_bottom(),
@@ -1183,6 +1311,11 @@ impl App {
                 View::Browser => {
                     if let Some(b) = self.browser.as_mut() {
                         b.selected = b.ids.len().saturating_sub(1);
+                    }
+                }
+                View::Stats => {
+                    if let Some(s) = self.stats.as_mut() {
+                        s.scroll = u16::MAX / 2;
                     }
                 }
             },
@@ -1291,6 +1424,10 @@ impl App {
                 Err(e) => self.error(e.to_string()),
             },
             Action::Back => match self.view {
+                View::Stats => {
+                    self.view = View::Decks;
+                    self.stats = None;
+                }
                 View::Review => self.leave_review(),
                 View::Browser => {
                     self.view = View::Decks;
@@ -1327,7 +1464,7 @@ impl App {
                     View::Review => {
                         self.review.as_ref().map(|r| format!("deck:\"{}\"", r.deck_name)).unwrap_or_default()
                     }
-                    View::Browser => String::new(),
+                    View::Browser | View::Stats => String::new(),
                 };
                 self.open_browser(q);
             }
@@ -1367,7 +1504,7 @@ impl App {
                 let id = match self.view {
                     View::Browser => self.browser.as_ref().and_then(|b| b.current_id()),
                     View::Review => self.review.as_ref().and_then(|r| r.card.as_ref().map(|c| c.card_id)),
-                    View::Decks => None,
+                    View::Decks | View::Stats => None,
                 };
                 let Some(id) = id else { return };
                 if let Some(b) = self.browser.as_mut() {
@@ -1457,6 +1594,80 @@ impl App {
                     b.toggle_reverse(&mut engine.borrow_mut());
                 }
             }
+            Action::Stats | Action::StatsAll => {
+                let (title, search) = if action == Action::StatsAll {
+                    ("whole collection".to_string(), String::new())
+                } else {
+                    match self.view {
+                        View::Decks => match self.decks.selected_deck() {
+                            Some(d) => (d.full_name.clone(), format!("deck:\"{}\"", d.full_name)),
+                            None => ("whole collection".into(), String::new()),
+                        },
+                        View::Review => match self.review.as_ref() {
+                            Some(r) => (r.deck_name.clone(), format!("deck:\"{}\"", r.deck_name)),
+                            None => ("whole collection".into(), String::new()),
+                        },
+                        View::Browser => match self.browser.as_ref() {
+                            Some(b) if !b.query.is_empty() => (b.query.clone(), b.query.clone()),
+                            _ => ("whole collection".into(), String::new()),
+                        },
+                        View::Stats => return,
+                    }
+                };
+                let r = self.eng().stats(&search, 365);
+                match r {
+                    Ok(st) => {
+                        self.stats = Some(StatsView::new(title, st));
+                        self.view = View::Stats;
+                    }
+                    Err(e) => self.error(e.to_string()),
+                }
+            }
+            Action::DeckOptions => {
+                let deck = match self.view {
+                    View::Decks => self.decks.selected_deck().map(|d| d.id),
+                    View::Review => self.review.as_ref().and_then(|r| r.card.as_ref().map(|c| c.deck_id)),
+                    View::Browser => self.browser.as_ref().and_then(|b| b.current().map(|r| r.deck_id)),
+                    View::Stats => None,
+                };
+                match deck {
+                    Some(id) => self.edit_request = Some(EditRequest::Options { deck: id }),
+                    None => self.info("select a deck first"),
+                }
+            }
+            Action::PromptNewDeck => self.prompt(PromptKind::NewDeck),
+            Action::PromptRenameDeck => {
+                if let Some(d) = self.decks.selected_deck() {
+                    let (id, name) = (d.id, d.full_name.clone());
+                    self.prompt(PromptKind::RenameDeck(id, name.clone()));
+                    self.cmdline = name;
+                }
+            }
+            Action::ConfirmDeleteDeck => {
+                if let Some(d) = self.decks.selected_deck() {
+                    let (id, name, n) = (d.id, d.full_name.clone(), d.total_with_children);
+                    self.prompt(PromptKind::ConfirmDeleteDeck(id, name, n));
+                }
+            }
+            Action::FsrsOptimize => {
+                let deck = match self.view {
+                    View::Decks => self.decks.selected_deck().map(|d| (d.id, d.full_name.clone())),
+                    View::Review => {
+                        self.review.as_ref().and_then(|r| r.card.as_ref().map(|c| (c.deck_id, r.deck_name.clone())))
+                    }
+                    _ => None,
+                };
+                let Some((id, name)) = deck else {
+                    self.info("select a deck first");
+                    return;
+                };
+                self.info(format!("optimising FSRS for {name}…"));
+                let r = self.eng().fsrs_optimize(id);
+                match r {
+                    Ok((_, n)) => self.info(format!("FSRS parameters optimised for {name} from {n} reviews")),
+                    Err(e) => self.error(e.to_string()),
+                }
+            }
             Action::Lua(idx) => {
                 self.lua.set_snapshot(self.snapshot());
                 self.lua.call_action(idx);
@@ -1466,7 +1677,7 @@ impl App {
                 let note_id = match self.view {
                     View::Review => self.review.as_ref().and_then(|r| r.card.as_ref().map(|c| c.note_id)),
                     View::Browser => self.browser.as_ref().and_then(|b| b.current().map(|r| r.note_id)),
-                    View::Decks => None,
+                    View::Decks | View::Stats => None,
                 };
                 match note_id {
                     Some(id) => self.edit_request = Some(EditRequest::Existing { note_id: id }),
@@ -1478,6 +1689,7 @@ impl App {
                     View::Decks => self.decks.selected_deck().map(|d| d.full_name.clone()),
                     View::Review => self.review.as_ref().map(|r| r.deck_name.clone()),
                     View::Browser => self.browser.as_ref().and_then(|b| b.current().map(|r| r.deck.clone())),
+                    View::Stats => None,
                 }
                 .unwrap_or_else(|| "Default".into());
                 self.edit_request = Some(EditRequest::New { deck });
@@ -1532,6 +1744,11 @@ impl App {
                 let insert = self.mode == Mode::Insert;
                 if let Some(b) = self.browser.as_mut() {
                     b.draw(f, chunks[0], &theme, &mut engine.borrow_mut(), insert);
+                }
+            }
+            View::Stats => {
+                if let Some(s) = self.stats.as_mut() {
+                    s.draw(f, chunks[0], &theme);
                 }
             }
         }
@@ -1690,6 +1907,10 @@ impl App {
             theme.muted(),
         )));
         lines.push(Line::from(Span::styled(" :lua CODE  :theme NAME  :edit  :add", theme.muted())));
+        lines.push(Line::from(Span::styled(
+            " :stats [all]  :options  :fsrs optimize|on|off  :deck create|rename|delete",
+            theme.muted(),
+        )));
         for (name, desc) in self.lua.command_names() {
             lines.push(Line::from(vec![
                 Span::styled(format!(" :{name:<9}"), theme.accent()),
@@ -1752,7 +1973,9 @@ fn compose_keymaps(
 ) -> HashMap<View, Keymap<Action>> {
     let global = by_name.get("global").cloned().unwrap_or_default();
     let mut out = HashMap::new();
-    for (view, name) in [(View::Decks, "decks"), (View::Review, "review"), (View::Browser, "browser")] {
+    for (view, name) in
+        [(View::Decks, "decks"), (View::Review, "review"), (View::Browser, "browser"), (View::Stats, "stats")]
+    {
         let mut km = global.clone();
         if let Some(own) = by_name.get(name) {
             km.extend(own);

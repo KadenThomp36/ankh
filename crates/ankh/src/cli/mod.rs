@@ -58,8 +58,19 @@ fn dispatch(cmd: Command, paths: Paths, out: &Out) -> Result<()> {
         Command::Note { note_id } => note(paths, note_id, out),
         Command::Edit { note_id } => edit(paths, note_id, out),
         Command::Add { fields, deck, notetype, tags, file } => add(paths, fields, deck, notetype, tags, file, out),
-        Command::Export { query, out: path } => export(paths, &query.join(" "), path, out),
-        Command::Import { path } => import(paths, &path, out),
+        Command::Export { query, out: path, apkg, with_scheduling, no_media } => {
+            if apkg {
+                let Some(p) = path else { return Err(anyhow::anyhow!("--apkg needs --out FILE.apkg").into()) };
+                export_apkg(paths, &query.join(" "), &p, with_scheduling, !no_media, out)
+            } else {
+                export(paths, &query.join(" "), path, out)
+            }
+        }
+        Command::Import { path, notetype, deck } => import(paths, &path, notetype, deck, out),
+        Command::Deck { op } => deck_op(paths, op, out),
+        Command::Options { deck, edit, fsrs } => options(paths, &deck, edit, fsrs, out),
+        Command::Fsrs { op: crate::FsrsOp::Optimize { deck } } => fsrs_optimize(paths, &deck, out),
+        Command::Stats { deck, days } => stats(paths, deck, days, out),
         Command::Notetypes => notetypes(paths, out),
         Command::Config { defaults } => {
             if defaults {
@@ -590,15 +601,189 @@ fn export(paths: Paths, query: &str, path: Option<std::path::PathBuf>, out: &Out
     Ok(())
 }
 
-fn import(paths: Paths, path: &std::path::Path, out: &Out) -> Result<()> {
-    let text = std::fs::read_to_string(path)?;
+fn import(
+    paths: Paths,
+    path: &std::path::Path,
+    notetype: Option<String>,
+    deck: Option<String>,
+    out: &Out,
+) -> Result<()> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     let mut eng = Engine::open(paths)?;
-    let r = crate::editor::save_note_file(&mut eng, &text)?;
+    match ext.as_str() {
+        "apkg" => {
+            let s = eng.import_apkg(&path.to_string_lossy())?;
+            eng.close()?;
+            out.ok(
+                &format!("imported: {} added, {} updated, {} duplicates, {} conflicting", s.added, s.updated, s.duplicates, s.conflicting),
+                serde_json::to_value(&s).unwrap(),
+            );
+        }
+        "csv" | "tsv" | "txt" => {
+            let nt = match notetype {
+                Some(n) => n,
+                None => eng.default_notetype()?,
+            };
+            let deck = match deck {
+                Some(d) => d,
+                None => eng.current_deck()?.1,
+            };
+            let s = eng.import_csv(&path.to_string_lossy(), &nt, &deck)?;
+            eng.close()?;
+            out.ok(
+                &format!("imported into {deck} as {nt}: {} added, {} updated, {} duplicates", s.added, s.updated, s.duplicates),
+                serde_json::to_value(&s).unwrap(),
+            );
+        }
+        "colpkg" => {
+            return Err(anyhow::anyhow!(
+                "importing a .colpkg replaces the whole collection; restore it in Anki desktop, then `ankh sync --download`"
+            )
+            .into())
+        }
+        _ => {
+            let text = std::fs::read_to_string(path)?;
+            let r = crate::editor::save_note_file(&mut eng, &text)?;
+            eng.close()?;
+            out.ok(
+                &format!("added {}, updated {}", r.added, r.updated),
+                serde_json::json!({ "added": r.added, "updated": r.updated, "note_ids": r.ids }),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn export_apkg(
+    paths: Paths,
+    query: &str,
+    path: &std::path::Path,
+    with_scheduling: bool,
+    with_media: bool,
+    out: &Out,
+) -> Result<()> {
+    let mut eng = Engine::open(paths)?;
+    let n = eng.export_apkg(&path.to_string_lossy(), query, with_scheduling, with_media)?;
+    eng.close()?;
+    out.ok(&format!("exported {n} notes to {}", path.display()), serde_json::json!({ "notes": n, "path": path }));
+    Ok(())
+}
+
+fn deck_op(paths: Paths, op: crate::DeckOp, out: &Out) -> Result<()> {
+    let mut eng = Engine::open(paths)?;
+    match op {
+        crate::DeckOp::Create { name } => {
+            let id = eng.create_deck(&name)?;
+            out.ok(&format!("created {name}"), serde_json::json!({ "deck_id": id, "name": name }));
+        }
+        crate::DeckOp::Rename { name, new_name } => {
+            let id = find_deck(&mut eng, &name)?;
+            eng.rename_deck(id, &new_name)?;
+            out.ok(&format!("renamed {name} → {new_name}"), serde_json::json!({ "deck_id": id, "name": new_name }));
+        }
+        crate::DeckOp::Delete { name, yes } => {
+            let id = find_deck(&mut eng, &name)?;
+            if !yes {
+                if !std::io::stdin().is_terminal() {
+                    return Err(anyhow::anyhow!("refusing to delete {name} without --yes").into());
+                }
+                let ans = prompt(&format!("delete {name}, its subdecks and all their cards? [y/N]"))?;
+                if !ans.eq_ignore_ascii_case("y") {
+                    out.ok("cancelled", serde_json::json!({ "deleted": 0 }));
+                    return Ok(());
+                }
+            }
+            let n = eng.delete_deck(id)?;
+            out.ok(&format!("deleted {name} ({n} cards)"), serde_json::json!({ "deck_id": id, "cards": n }));
+        }
+    }
+    eng.close()?;
+    Ok(())
+}
+
+fn options(paths: Paths, deck: &str, edit: bool, fsrs: Option<String>, out: &Out) -> Result<()> {
+    let mut eng = Engine::open(paths)?;
+    let id = find_deck(&mut eng, deck)?;
+    if let Some(f) = fsrs {
+        let on = matches!(f.to_ascii_lowercase().as_str(), "on" | "true" | "1" | "yes");
+        eng.set_fsrs_enabled(id, on)?;
+        eng.close()?;
+        out.ok(&format!("FSRS {}", if on { "enabled" } else { "disabled" }), serde_json::json!({ "fsrs": on }));
+        return Ok(());
+    }
+    let (opts, info) = eng.deck_options(id)?;
+    let text = opts.to_toml(&info);
+    if edit {
+        let Some(edited) = crate::editor::edit_text(&text, "options")? else {
+            eng.close()?;
+            out.ok("no changes", serde_json::json!({ "changed": false }));
+            return Ok(());
+        };
+        let new = ankh_core::DeckOptions::from_toml(&edited)?;
+        eng.save_deck_options(id, &new)?;
+        eng.close()?;
+        out.ok(&format!("saved preset {:?}", new.preset), serde_json::json!({ "changed": true, "preset": new.preset }));
+    } else {
+        eng.close()?;
+        out.ok(&text, serde_json::json!({ "options": opts, "info": info }));
+    }
+    Ok(())
+}
+
+fn fsrs_optimize(paths: Paths, deck: &str, out: &Out) -> Result<()> {
+    let mut eng = Engine::open(paths)?;
+    let id = find_deck(&mut eng, deck)?;
+    eprintln!("optimising FSRS parameters for {deck} — this can take a minute…");
+    let (params, items) = eng.fsrs_optimize(id)?;
     eng.close()?;
     out.ok(
-        &format!("added {}, updated {}", r.added, r.updated),
-        serde_json::json!({ "added": r.added, "updated": r.updated, "note_ids": r.ids }),
+        &format!(
+            "optimised from {items} reviews: [{}]",
+            params.iter().map(|p| format!("{p:.4}")).collect::<Vec<_>>().join(", ")
+        ),
+        serde_json::json!({ "params": params, "reviews": items }),
     );
+    Ok(())
+}
+
+fn stats(paths: Paths, deck: Option<String>, days: u32, out: &Out) -> Result<()> {
+    let mut eng = Engine::open(paths)?;
+    let search = match &deck {
+        Some(d) => format!("deck:\"{d}\""),
+        None => String::new(),
+    };
+    let s = eng.stats(&search, days)?;
+    eng.close()?;
+    let t = &s.today;
+    let c = &s.counts;
+    let due_week: u32 = s.forecast.iter().filter(|(d, _)| **d <= 7).map(|(_, n)| n).sum();
+    let reviews_30: u32 = s.reviews_per_day.iter().filter(|(d, _)| **d < 30).map(|(_, n)| n).sum();
+    let backlog = s
+        .forecast
+        .keys()
+        .next()
+        .filter(|d| **d < 0)
+        .map(|d| format!(" (backlog from {}d ago)", -d))
+        .unwrap_or_default();
+    let text = format!(
+        "{}\n\ntoday      {} cards in {:.1} min, {}% correct\ncards      {} new · {} learning · {} young · {} mature · {} suspended · {} buried\nnext 7d    {} due{}\nlast 30d   {} reviews\nretention  {}\nmemory     {:.0}% average retrievability",
+        deck.clone().unwrap_or_else(|| "whole collection".into()),
+        t.answered,
+        t.secs / 60.0,
+        t.correct.saturating_mul(100).checked_div(t.answered).unwrap_or(0),
+        c.new,
+        c.learning + c.relearning,
+        c.young,
+        c.mature,
+        c.suspended,
+        c.buried,
+        due_week,
+        backlog,
+        reviews_30,
+        s.mature_retention.map(|r| format!("{:.1}% (mature, last month)", r * 100.0)).unwrap_or_else(|| "—".into()),
+        s.average_retrievability,
+    );
+    out.ok(&text, serde_json::to_value(&s).unwrap());
     Ok(())
 }
 
