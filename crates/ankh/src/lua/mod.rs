@@ -224,8 +224,7 @@ impl Runtime {
             let Some(hs) = st.handlers.get(event) else { return };
             hs.iter()
                 .filter_map(|k| self.lua.registry_value::<Function>(k).ok())
-                .map(|f| self.lua.create_registry_value(f).ok())
-                .flatten()
+                .filter_map(|f| self.lua.create_registry_value(f).ok())
                 .collect()
         };
         if keys.is_empty() {
