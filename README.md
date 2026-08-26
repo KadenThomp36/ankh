@@ -27,7 +27,7 @@ Early. Milestones, in order:
 - [x] **3 · rendering** — notetype CSS (classes, alignment, size→weight), Unicode/CJK wrapping, `<ruby>`, inline images (Kitty/Sixel/iTerm2/half-blocks), hints (`H`), type-answer and MathJax placeholders, theme-safe colours
 - [x] **4 · browser** — Anki search syntax, sortable table, question/answer preview, card info + review log, visual-mode bulk ops (suspend/bury/flag/mark/tag/move/due/forget/delete), `ankh search` / `ankh card` / `ankh bulk`
 - [x] **5 · editor** — notes as Markdown + frontmatter in `$EDITOR` (lossless: un-round-trippable HTML stays raw), batch add, `ankh export`/`import` for git-able decks, nvim ftplugin
-- [ ] **6 · Lua** — `init.lua`, keymaps, events, plugins
+- [x] **6 · Lua** — embedded Lua 5.4: `init.lua`, `ankh.setup`, keymaps to actions or functions, events, `:Commands`, `:lua`, read/act API, plugins on `package.path`, six themes
 - [ ] **7 · management** — deck options/FSRS, stats, import/export
 - [ ] **8 · polish** — `:help`, themes, release binaries
 
@@ -74,6 +74,22 @@ ankh import mining.md                     # ids update, new entries add
 Editing: `e` in the browser or `<Space>e` while reviewing opens the note in
 `$EDITOR`; `a` adds a note to the current deck. See `docs/adr/0005-note-files.md`
 for the file format and `contrib/nvim` for the ftplugin.
+
+## Configure
+
+`~/.config/ankh/init.lua` (see `ankh config --defaults` for every default and
+`docs/lua.md` for the API):
+
+```lua
+local ankh = require("ankh")
+ankh.setup({ theme = "catppuccin", sync = { on_quit = false } })
+ankh.keymap.set("review", "<leader>d", function()
+  local c = ankh.card.current()
+  os.execute(("xdg-open 'https://en.dict.naver.com/#/search?query=%s' &"):format(c.question))
+end, { desc = "look up in Naver" })
+ankh.on("card_answered", function(card) print(card.id, card.rating) end)
+ankh.command("Leeches", function() ankh.browse('tag:leech deck:"' .. ankh.deck.current() .. '"') end)
+```
 
 ## Design
 

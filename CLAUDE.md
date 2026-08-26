@@ -14,6 +14,11 @@ anything non-trivial.
 - `ankh-core::markdown` / `notefile` / `notes` — note file format (ADR 0005).
   `markdown::html_to_md` must stay lossless-or-raw; add a test for every new
   HTML construct you decide to support.
+- `crates/ankh/src/lua/` — the Lua runtime. `defaults.lua` is the source of
+  truth for default options and keymaps; Rust holds no default bindings.
+  Lua never touches `App`: it reads a `Snapshot`, borrows the shared
+  `Engine`, and pushes `Request`s the app drains. `Action::from_name` is the
+  contract between Lua and the UI — keep `Action::NAMES` in sync.
 - `crates/ankh` — the binary. `editor.rs` is the `$EDITOR` handoff. `cli/` (headless commands, `--format`), `tui/`
   (ratatui app: `app.rs` loop, `keys.rs` notation + trie, `theme.rs`,
   `banner.rs`, `views/`).
@@ -26,6 +31,11 @@ anything non-trivial.
 - Never persist the AnkiWeb password. Never log credentials.
 - rslib is pinned by tag in the workspace `Cargo.toml`; bump deliberately and
   re-run the sync smoke test against a real account.
+- `App.engine` is `Rc<RefCell<Engine>>` (shared with Lua). Never hold the
+  borrow across a call into another `App` method — bind results to a local
+  before `match`ing on them.
+- Key sequences: an exact match that is also a prefix of a longer binding
+  waits `timeoutlen` (neovim semantics) — `<Space>` vs `<Space>e`.
 - rslib's `progress` module is private — see `ProgressLink` in
   `engine.rs` for the workaround; don't try to name `ProgressState`.
 - Sync policy: on launch, on quit, on demand. Never periodic. A full-sync

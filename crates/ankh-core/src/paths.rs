@@ -48,6 +48,10 @@ impl Paths {
     pub fn init_lua(&self) -> PathBuf {
         self.config_dir.join("init.lua")
     }
+    /// Lua plugins, shared by all profiles.
+    pub fn plugins_dir(&self) -> PathBuf {
+        self.config_dir.join("plugins")
+    }
     pub fn log_file(&self) -> PathBuf {
         self.state_dir.join("ankh.log")
     }

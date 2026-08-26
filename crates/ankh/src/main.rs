@@ -1,5 +1,6 @@
 mod cli;
 mod editor;
+mod lua;
 mod tui;
 
 use std::path::PathBuf;
@@ -150,6 +151,12 @@ pub enum Command {
     Import { path: PathBuf },
     /// List notetypes and their fields
     Notetypes,
+    /// Show config paths, or dump the built-in defaults.lua
+    Config {
+        /// Print the embedded defaults.lua (copy it to init.lua to customise)
+        #[arg(long)]
+        defaults: bool,
+    },
     /// Answer a card previously shown by `next`
     Answer {
         card_id: i64,

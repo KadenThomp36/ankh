@@ -185,20 +185,38 @@ impl<A: Clone> Default for Keymap<A> {
 }
 
 impl<A: Clone> Keymap<A> {
+    #[cfg(test)]
     pub fn bind(&mut self, seq: &str, action: A, desc: impl Into<String>) -> &mut Self {
         let seq = parse_seq(seq).expect("valid default key sequence");
         self.bindings.insert(seq.clone(), Binding { seq, action, desc: desc.into() });
         self
     }
 
+    pub fn bind_seq(&mut self, seq: Vec<Key>, action: A, desc: impl Into<String>) -> &mut Self {
+        self.bindings.insert(seq.clone(), Binding { seq, action, desc: desc.into() });
+        self
+    }
+
+    /// Overlay another keymap's bindings on top of this one.
+    pub fn extend(&mut self, other: &Keymap<A>) {
+        for b in other.bindings.values() {
+            self.bindings.insert(b.seq.clone(), b.clone());
+        }
+    }
+
     pub fn unbind(&mut self, seq: &[Key]) {
         self.bindings.remove(seq);
     }
 
+    /// Is `pending` a strict prefix of some longer binding?
+    pub fn has_longer(&self, pending: &[Key]) -> bool {
+        self.bindings.keys().any(|seq| seq.len() > pending.len() && seq.starts_with(pending))
+    }
+
     pub fn lookup(&self, pending: &[Key]) -> Match<'_, A> {
         if let Some(b) = self.bindings.get(pending) {
-            // An exact binding that is also a prefix of longer ones wins immediately
-            // (like neovim with timeoutlen=0 for ambiguity we don't want).
+            // An exact match that is also a prefix of longer bindings is
+            // ambiguous; the caller waits `timeoutlen` before firing it.
             return Match::Exact(b);
         }
         let mut next: Vec<(String, &str)> = Vec::new();

@@ -52,6 +52,147 @@ impl Theme {
         }
     }
 
+    pub fn by_name(name: &str) -> Option<Theme> {
+        Some(match name.to_ascii_lowercase().replace('_', "-").as_str() {
+            "tokyonight" | "tokyo-night" => Theme::tokyonight(),
+            "catppuccin" | "catppuccin-mocha" | "mocha" => Theme::catppuccin(),
+            "gruvbox" | "gruvbox-dark" => Theme::gruvbox(),
+            "rose-pine" | "rosepine" => Theme::rose_pine(),
+            "nord" => Theme::nord(),
+            "dracula" => Theme::dracula(),
+            _ => return None,
+        })
+    }
+
+    pub const NAMES: [&'static str; 6] = ["tokyonight", "catppuccin", "gruvbox", "rose-pine", "nord", "dracula"];
+
+    fn rgb(hex: u32) -> Color {
+        Color::Rgb((hex >> 16) as u8, (hex >> 8 & 0xff) as u8, (hex & 0xff) as u8)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        name: &'static str,
+        bg: u32,
+        bg_alt: u32,
+        fg: u32,
+        muted: u32,
+        border: u32,
+        accent: u32,
+        selection: u32,
+        new: u32,
+        learn: u32,
+        review: u32,
+        warn: u32,
+        banner: [u32; 4],
+    ) -> Theme {
+        let c = Theme::rgb;
+        Theme {
+            name,
+            dark: true,
+            bg: c(bg),
+            bg_alt: c(bg_alt),
+            fg: c(fg),
+            muted: c(muted),
+            border: c(border),
+            accent: c(accent),
+            selection: c(selection),
+            new: c(new),
+            learn: c(learn),
+            review: c(review),
+            warn: c(warn),
+            error: c(learn),
+            ok: c(review),
+            banner: [c(banner[0]), c(banner[1]), c(banner[2]), c(banner[3])],
+        }
+    }
+
+    pub fn catppuccin() -> Self {
+        Theme::build(
+            "catppuccin",
+            0x1e1e2e,
+            0x313244,
+            0xcdd6f4,
+            0x6c7086,
+            0x45475a,
+            0x89b4fa,
+            0x45475a,
+            0x89b4fa,
+            0xf38ba8,
+            0xa6e3a1,
+            0xf9e2af,
+            [0xcba6f7, 0xb4befe, 0x89b4fa, 0x89dceb],
+        )
+    }
+    pub fn gruvbox() -> Self {
+        Theme::build(
+            "gruvbox",
+            0x282828,
+            0x3c3836,
+            0xebdbb2,
+            0x928374,
+            0x504945,
+            0x83a598,
+            0x504945,
+            0x83a598,
+            0xfb4934,
+            0xb8bb26,
+            0xfabd2f,
+            [0xd3869b, 0xb16286, 0x83a598, 0x8ec07c],
+        )
+    }
+    pub fn rose_pine() -> Self {
+        Theme::build(
+            "rose-pine",
+            0x191724,
+            0x1f1d2e,
+            0xe0def4,
+            0x6e6a86,
+            0x403d52,
+            0xc4a7e7,
+            0x403d52,
+            0x9ccfd8,
+            0xeb6f92,
+            0x31748f,
+            0xf6c177,
+            [0xebbcba, 0xc4a7e7, 0x9ccfd8, 0x31748f],
+        )
+    }
+    pub fn nord() -> Self {
+        Theme::build(
+            "nord",
+            0x2e3440,
+            0x3b4252,
+            0xeceff4,
+            0x4c566a,
+            0x434c5e,
+            0x88c0d0,
+            0x434c5e,
+            0x81a1c1,
+            0xbf616a,
+            0xa3be8c,
+            0xebcb8b,
+            [0xb48ead, 0x81a1c1, 0x88c0d0, 0x8fbcbb],
+        )
+    }
+    pub fn dracula() -> Self {
+        Theme::build(
+            "dracula",
+            0x282a36,
+            0x44475a,
+            0xf8f8f2,
+            0x6272a4,
+            0x44475a,
+            0xbd93f9,
+            0x44475a,
+            0x8be9fd,
+            0xff5555,
+            0x50fa7b,
+            0xf1fa8c,
+            [0xff79c6, 0xbd93f9, 0x8be9fd, 0x50fa7b],
+        )
+    }
+
     pub fn base(&self) -> Style {
         Style::default().fg(self.fg).bg(self.bg)
     }

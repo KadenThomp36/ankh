@@ -61,6 +61,17 @@ fn dispatch(cmd: Command, paths: Paths, out: &Out) -> Result<()> {
         Command::Export { query, out: path } => export(paths, &query.join(" "), path, out),
         Command::Import { path } => import(paths, &path, out),
         Command::Notetypes => notetypes(paths, out),
+        Command::Config { defaults } => {
+            if defaults {
+                print!("{}", crate::lua::DEFAULTS);
+            } else {
+                out.ok(
+                    &format!("init.lua     {}\ncollection   {}\nlog          {}", paths.init_lua().display(), paths.collection().display(), paths.log_file().display()),
+                    serde_json::json!({ "init_lua": paths.init_lua(), "collection": paths.collection(), "log": paths.log_file() }),
+                );
+            }
+            Ok(())
+        }
         Command::Card { card_id } => card(paths, card_id, out),
         Command::Bulk { query, suspend, unsuspend, bury, flag, tag, untag, move_to, forget, due, delete, yes } => {
             let op = if suspend {

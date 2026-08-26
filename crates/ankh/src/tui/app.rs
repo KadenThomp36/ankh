@@ -11,7 +11,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
+use std::cell::{RefCell, RefMut};
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use super::audio::Player;
 use super::images::Images;
@@ -20,6 +22,7 @@ use super::theme::Theme;
 use super::views::browser::BrowserView;
 use super::views::decks::DecksView;
 use super::views::review::{ReviewView, Stage};
+use crate::lua::{Config, Request, Runtime, Snapshot};
 use ankh_core::{Av, Rating};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +86,142 @@ pub enum Action {
     StudyCard,
     EditNote,
     AddNote,
+    /// A Lua function registered through `ankh.keymap.set`.
+    Lua(usize),
+}
+
+impl Action {
+    /// Parse the names used by `ankh.keymap.set` / `ankh.action`.
+    pub fn from_name(s: &str) -> Option<Action> {
+        let mut it = s.split_whitespace();
+        let head = it.next()?;
+        let arg = it.next();
+        let num = || arg.and_then(|a| a.parse::<u8>().ok());
+        Some(match head {
+            "quit" => Action::Quit,
+            "force_quit" => Action::ForceQuit,
+            "down" => Action::Down,
+            "up" => Action::Up,
+            "top" => Action::Top,
+            "bottom" => Action::Bottom,
+            "half_down" => Action::HalfDown,
+            "half_up" => Action::HalfUp,
+            "expand" => Action::Expand,
+            "collapse" => Action::Collapse,
+            "toggle_fold" => Action::ToggleFold,
+            "open" => Action::Open,
+            "sync" => Action::Sync,
+            "sync_download" => Action::SyncDownload,
+            "sync_upload" => Action::SyncUpload,
+            "refresh" => Action::Refresh,
+            "command_mode" => Action::CommandMode,
+            "help" => Action::Help,
+            "clear_message" => Action::ClearMessage,
+            "show_answer" => Action::ShowAnswer,
+            "continue" => Action::Continue,
+            "rate" => Action::Rate(match arg? {
+                "again" | "1" => Rating::Again,
+                "hard" | "2" => Rating::Hard,
+                "good" | "3" => Rating::Good,
+                "easy" | "4" => Rating::Easy,
+                _ => return None,
+            }),
+            "undo" => Action::Undo,
+            "bury" => Action::Bury,
+            "suspend" => Action::Suspend,
+            "toggle_mark" => Action::ToggleMark,
+            "flag" => Action::Flag(num().filter(|n| *n <= 7)?),
+            "replay" => Action::Replay,
+            "unbury" => Action::Unbury,
+            "back" => Action::Back,
+            "scroll_down" => Action::ScrollDown,
+            "scroll_up" => Action::ScrollUp,
+            "toggle_hints" => Action::ToggleHints,
+            "open_browser" => Action::OpenBrowser,
+            "browse_deck" => Action::BrowseDeck,
+            "insert_mode" => Action::InsertMode,
+            "visual_mode" => Action::VisualMode,
+            "clear_search" => Action::ClearSearch,
+            "preview" => Action::Preview,
+            "flip_preview" => Action::FlipPreview,
+            "card_info" => Action::CardInfo,
+            "toggle_suspend" => Action::ToggleSuspend,
+            "bulk_bury" => Action::BulkBury,
+            "bulk_flag" => Action::BulkFlag(num().filter(|n| *n <= 7)?),
+            "bulk_mark" => Action::BulkMark,
+            "prompt_tag" => Action::PromptTag,
+            "prompt_untag" => Action::PromptUntag,
+            "prompt_move" => Action::PromptMove,
+            "prompt_due" => Action::PromptDue,
+            "confirm_delete" => Action::ConfirmDelete,
+            "confirm_forget" => Action::ConfirmForget,
+            "cycle_sort" => Action::CycleSort,
+            "reverse_sort" => Action::ReverseSort,
+            "study_card" => Action::StudyCard,
+            "edit_note" => Action::EditNote,
+            "add_note" => Action::AddNote,
+            _ => return None,
+        })
+    }
+
+    pub const NAMES: &'static [&'static str] = &[
+        "quit",
+        "force_quit",
+        "down",
+        "up",
+        "top",
+        "bottom",
+        "half_down",
+        "half_up",
+        "expand",
+        "collapse",
+        "toggle_fold",
+        "open",
+        "sync",
+        "sync_download",
+        "sync_upload",
+        "refresh",
+        "command_mode",
+        "help",
+        "clear_message",
+        "show_answer",
+        "continue",
+        "rate again|hard|good|easy",
+        "undo",
+        "bury",
+        "suspend",
+        "toggle_mark",
+        "flag 0-7",
+        "replay",
+        "unbury",
+        "back",
+        "scroll_down",
+        "scroll_up",
+        "toggle_hints",
+        "open_browser",
+        "browse_deck",
+        "insert_mode",
+        "visual_mode",
+        "clear_search",
+        "preview",
+        "flip_preview",
+        "card_info",
+        "toggle_suspend",
+        "bulk_bury",
+        "bulk_flag 0-7",
+        "bulk_mark",
+        "prompt_tag",
+        "prompt_untag",
+        "prompt_move",
+        "prompt_due",
+        "confirm_delete",
+        "confirm_forget",
+        "cycle_sort",
+        "reverse_sort",
+        "study_card",
+        "edit_note",
+        "add_note",
+    ];
 }
 
 /// Something to do with the terminal released (run `$EDITOR`).
@@ -165,7 +304,9 @@ struct SyncState {
 }
 
 pub struct App {
-    engine: Engine,
+    /// Shared with the Lua runtime; never hold the borrow across a call
+    /// into another `App` method (they borrow it too).
+    engine: Rc<RefCell<Engine>>,
     creds: Option<Credentials>,
     theme: Theme,
     mode: Mode,
@@ -179,6 +320,9 @@ pub struct App {
     pending: Vec<Key>,
     count: Option<usize>,
     pending_since: Option<Instant>,
+    /// An exact match that is waiting in case a longer sequence follows
+    /// (`<Space>` vs `<Space>e` in review); fires on timeout.
+    pending_exact: Option<Action>,
     cmdline: String,
     message: Option<(Message, Instant)>,
     prompt: Option<Prompt>,
@@ -188,30 +332,40 @@ pub struct App {
     should_quit: bool,
     tick: u64,
     edit_request: Option<EditRequest>,
+    lua: Runtime,
+    config: Config,
 }
-
-const TIMEOUTLEN: Duration = Duration::from_millis(1000);
 
 impl App {
     pub fn new(paths: Paths, images: Images) -> Result<Self> {
         let store = AuthStore::new(&paths.profile);
         let creds = store.load()?;
-        let engine = Engine::open(paths)?;
+        let engine = Rc::new(RefCell::new(Engine::open(paths)?));
+        let init_lua = engine.borrow().paths().init_lua();
+        let lua = Runtime::new(engine.clone(), Some(init_lua));
+        let config = lua.config();
+        let lua_errors = lua.errors();
+        let theme = Theme::by_name(&config.theme).unwrap_or_else(Theme::tokyonight);
+        let mut audio = Player::new();
+        audio.enabled = config.audio_autoplay;
+        let (maps, deletions) = lua.keymaps();
+        let keymaps = compose_keymaps(&maps, &deletions);
         let mut app = App {
             engine,
             creds,
-            theme: Theme::tokyonight(),
+            theme,
             mode: Mode::Normal,
             view: View::Decks,
             decks: DecksView::default(),
             review: None,
             browser: None,
-            audio: Player::new(),
+            audio,
             images,
-            keymaps: default_keymaps(),
+            keymaps,
             pending: Vec::new(),
             count: None,
             pending_since: None,
+            pending_exact: None,
             cmdline: String::new(),
             message: None,
             prompt: None,
@@ -221,8 +375,17 @@ impl App {
             should_quit: false,
             tick: 0,
             edit_request: None,
+            lua,
+            config,
         };
         app.refresh();
+        if Theme::by_name(&app.config.theme).is_none() {
+            app.error(format!("unknown theme {:?} (have: {})", app.config.theme, Theme::NAMES.join(", ")));
+        }
+        for e in lua_errors {
+            app.error(format!("config: {e}"));
+        }
+        app.emit("startup", |_| Ok(mlua::Value::Nil));
         if !app.audio.available() {
             app.info("no audio player found — install mpv for card audio");
         }
@@ -232,10 +395,10 @@ impl App {
 
     pub fn run(mut self, mut terminal: DefaultTerminal) -> anyhow::Result<()> {
         // Sync on launch (when logged in). Never blocks the UI.
-        if self.creds.is_some() {
-            self.start_sync(SyncOp::Normal, false);
-        } else {
+        if self.creds.is_none() {
             self.info("not logged in — run `ankh login` in a shell to enable sync");
+        } else if self.config.sync_on_launch {
+            self.start_sync(SyncOp::Normal, false);
         }
         while !self.should_quit {
             if let Some(req) = self.edit_request.take() {
@@ -259,11 +422,17 @@ impl App {
             }
             self.on_tick();
         }
-        self.engine.close()?;
+        if let Ok(cell) = Rc::try_unwrap(self.engine) {
+            cell.into_inner().close()?;
+        }
         Ok(())
     }
 
     // ----- state helpers ---------------------------------------------------
+
+    fn eng(&self) -> RefMut<'_, Engine> {
+        self.engine.borrow_mut()
+    }
 
     fn info(&mut self, s: impl Into<String>) {
         self.message = Some((Message::Info(s.into()), Instant::now()));
@@ -274,7 +443,8 @@ impl App {
     }
 
     fn refresh(&mut self) {
-        match self.engine.deck_tree() {
+        let tree = self.eng().deck_tree();
+        match tree {
             Ok(t) => self.decks.set_tree(t),
             Err(Error::Busy) => {}
             Err(e) => self.error(e.to_string()),
@@ -290,7 +460,9 @@ impl App {
             self.error("not logged in — run `ankh login`");
             return;
         };
-        match self.engine.sync_in_background(creds, op, SyncOptions { media: true }) {
+        let media = self.config.sync_media;
+        let started = self.eng().sync_in_background(creds, op, SyncOptions { media });
+        match started {
             Ok(handle) => self.sync = Some(SyncState { handle, started: Instant::now(), quit_after }),
             Err(e) => self.error(e.to_string()),
         }
@@ -304,18 +476,26 @@ impl App {
             }
         }
         if let Some(since) = self.pending_since {
-            if since.elapsed() > TIMEOUTLEN && !self.pending.is_empty() {
-                // neovim's timeoutlen: give up on the sequence.
+            if since.elapsed() > Duration::from_millis(self.config.timeoutlen_ms) && !self.pending.is_empty() {
+                // neovim's timeoutlen: fire the shorter mapping if there was
+                // one, otherwise give up on the sequence.
                 self.pending.clear();
                 self.pending_since = None;
+                if let Some(action) = self.pending_exact.take() {
+                    let n = self.count.take().unwrap_or(1);
+                    for _ in 0..n.min(500) {
+                        self.dispatch(action);
+                    }
+                }
             }
         }
         if self.sync.as_ref().map(|s| s.handle.is_finished()).unwrap_or(false) {
             let SyncState { handle, quit_after, .. } = self.sync.take().unwrap();
-            match self.engine.finish_background(handle) {
+            let finished = self.eng().finish_background(handle);
+            match finished {
                 Ok((report, creds)) => {
                     if self.creds.as_ref() != Some(&creds) {
-                        let _ = AuthStore::new(&self.engine.paths().profile).save(&creds);
+                        let _ = AuthStore::new(&self.eng().paths().profile).save(&creds);
                         self.creds = Some(creds);
                     }
                     self.last_sync = Some(Instant::now());
@@ -325,7 +505,7 @@ impl App {
                         SyncOutcome::FullDownloaded => self.info("downloaded collection from AnkiWeb"),
                         SyncOutcome::FullUploaded => self.info("uploaded collection to AnkiWeb"),
                         SyncOutcome::FullSyncRequired { upload_ok, download_ok } => {
-                            if download_ok && self.engine.is_pristine().unwrap_or(false) {
+                            if download_ok && self.eng().is_pristine().unwrap_or(false) {
                                 self.info("empty local collection — downloading from AnkiWeb");
                                 self.start_sync(SyncOp::FullDownload, quit_after);
                                 return;
@@ -340,6 +520,7 @@ impl App {
                 Err(e) => self.error(format!("sync failed: {e}")),
             }
             self.refresh();
+            self.emit("sync_done", |_| Ok(mlua::Value::Nil));
             if quit_after {
                 self.should_quit = true;
             }
@@ -350,18 +531,18 @@ impl App {
         use crate::editor;
         match req {
             EditRequest::Existing { note_id } => {
-                let doc = self.engine.note_doc(note_id).map_err(|e| e.to_string())?;
+                let doc = self.eng().note_doc(note_id).map_err(|e| e.to_string())?;
                 let text = ankh_core::notefile::write(&[doc]);
                 let Some(edited) = editor::edit_text(&text, &format!("note-{note_id}")).map_err(|e| e.to_string())?
                 else {
                     return Ok("no changes".into());
                 };
-                let r = editor::save_note_file(&mut self.engine, &edited).map_err(|e| e.to_string())?;
+                let r = editor::save_note_file(&mut self.eng(), &edited).map_err(|e| e.to_string())?;
                 self.after_edit();
                 Ok(format!("saved note {note_id}{}", if r.updated == 1 { "" } else { " (+ more)" }))
             }
             EditRequest::New { deck } => {
-                let text = editor::new_note_template(&mut self.engine, None, &deck).map_err(|e| e.to_string())?;
+                let text = editor::new_note_template(&mut self.eng(), None, &deck).map_err(|e| e.to_string())?;
                 let Some(edited) = editor::edit_text(&text, "new").map_err(|e| e.to_string())? else {
                     return Ok("cancelled".into());
                 };
@@ -369,7 +550,7 @@ impl App {
                 if editor::is_blank(&body) {
                     return Ok("cancelled (empty note)".into());
                 }
-                let r = editor::save_note_file(&mut self.engine, &body).map_err(|e| e.to_string())?;
+                let r = editor::save_note_file(&mut self.eng(), &body).map_err(|e| e.to_string())?;
                 self.after_edit();
                 Ok(format!("added {} note{}", r.added, plural(r.added)))
             }
@@ -381,9 +562,10 @@ impl App {
         match self.view {
             View::Review => {
                 // Re-render the current card with its new content.
+                let fresh = self.eng().next_card();
                 if let Some(rv) = self.review.as_mut() {
                     if let Some(card) = rv.card.clone() {
-                        if let Ok(Some(fresh)) = self.engine.next_card() {
+                        if let Ok(Some(fresh)) = fresh {
                             if fresh.card_id == card.card_id {
                                 let shown = rv.answer_shown();
                                 rv.show_card(fresh);
@@ -396,12 +578,73 @@ impl App {
                 }
             }
             View::Browser => {
+                let engine = self.engine.clone();
                 if let Some(b) = self.browser.as_mut() {
-                    b.refresh(&mut self.engine);
+                    b.refresh(&mut engine.borrow_mut());
                 }
             }
             View::Decks => self.refresh(),
         }
+    }
+
+    // ----- lua -----------------------------------------------------------------
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            view: match self.view {
+                View::Decks => "decks",
+                View::Review => "review",
+                View::Browser => "browser",
+            }
+            .into(),
+            mode: self.mode.label().to_lowercase(),
+            card: self.review.as_ref().and_then(|r| r.card.clone()),
+            answer_shown: self.review.as_ref().map(|r| r.answer_shown()).unwrap_or(false),
+            deck: match self.view {
+                View::Decks => self.decks.selected_deck().map(|d| d.full_name.clone()),
+                View::Review => self.review.as_ref().map(|r| r.deck_name.clone()),
+                View::Browser => self.browser.as_ref().and_then(|b| b.current().map(|r| r.deck.clone())),
+            },
+        }
+    }
+
+    /// Fire a Lua event, then act on whatever the handlers asked for.
+    fn emit(&mut self, event: &str, payload: impl FnOnce(&mlua::Lua) -> mlua::Result<mlua::Value>) {
+        self.lua.set_snapshot(self.snapshot());
+        self.lua.emit(event, payload);
+        self.drain_requests();
+    }
+
+    fn drain_requests(&mut self) {
+        for r in self.lua.take_requests() {
+            match r {
+                Request::Action(a) => self.dispatch(a),
+                Request::Command(c) => self.run_command(&c),
+                Request::Notify(m) => self.info(m),
+                Request::Error(m) => self.error(m),
+                Request::Browse(q) => self.open_browser(q),
+            }
+        }
+    }
+
+    fn emit_card(&mut self, event: &str, extra: Option<(&'static str, String)>) {
+        let Some(card) = self.review.as_ref().and_then(|r| r.card.clone()) else { return };
+        let lua_card = self.lua.card_table(&card);
+        self.emit(event, move |_| {
+            let t = lua_card?;
+            if let Some((k, v)) = extra {
+                t.set(k, v)?;
+            }
+            Ok(mlua::Value::Table(t))
+        });
+    }
+
+    fn undo_result(&self) -> Result<Option<String>> {
+        self.eng().undo()
+    }
+
+    fn unbury_result(&self) -> Result<()> {
+        self.eng().unbury_current_deck()
     }
 
     fn keymap(&self) -> &Keymap<Action> {
@@ -413,11 +656,12 @@ impl App {
     fn open_deck(&mut self) {
         let Some(d) = self.decks.selected_deck() else { return };
         let (id, name) = (d.id, d.full_name.clone());
-        if let Err(e) = self.engine.select_deck(id) {
+        let selected = self.eng().select_deck(id);
+        if let Err(e) = selected {
             self.error(e.to_string());
             return;
         }
-        let mut rv = ReviewView::new(name, self.engine.paths().media_folder());
+        let mut rv = ReviewView::new(name, self.eng().paths().media_folder());
         rv.session_started = Instant::now();
         self.review = Some(rv);
         self.view = View::Review;
@@ -426,21 +670,25 @@ impl App {
 
     /// Load the next card (or the "done" screen) into the review view.
     fn advance(&mut self) {
-        match self.engine.next_card() {
+        let next = self.eng().next_card();
+        match next {
             Ok(Some(card)) => {
                 let av = card.question_av.clone();
                 if let Some(rv) = self.review.as_mut() {
                     rv.show_card(card);
                 }
                 self.play(&av);
+                self.emit_card("card_shown", None);
             }
             Ok(None) => {
                 self.audio.stop();
-                match self.engine.congrats() {
+                let congrats = self.eng().congrats();
+                match congrats {
                     Ok(c) => {
                         if let Some(rv) = self.review.as_mut() {
                             rv.finish(c);
                         }
+                        self.emit("review_done", |_| Ok(mlua::Value::Nil));
                     }
                     Err(e) => self.error(e.to_string()),
                 }
@@ -453,7 +701,7 @@ impl App {
         let files: Vec<_> = av
             .iter()
             .filter_map(|a| match a {
-                Av::File { name } => Some(self.engine.media_path(name)),
+                Av::File { name } => Some(self.eng().media_path(name)),
                 Av::Tts { .. } => None,
             })
             .collect();
@@ -479,7 +727,9 @@ impl App {
         }
         let Some(card) = rv.card.clone() else { return };
         let taken = rv.millis_taken();
-        match self.engine.answer(&card, rating, taken) {
+        self.emit_card("card_answered", Some(("rating", rating.label().to_string())));
+        let answered = self.eng().answer(&card, rating, taken);
+        match answered {
             Ok(()) => {
                 if let Some(rv) = self.review.as_mut() {
                     rv.reviewed += 1;
@@ -536,6 +786,7 @@ impl App {
     }
 
     fn on_key_insert(&mut self, key: Key) {
+        let engine = self.engine.clone();
         let Some(b) = self.browser.as_mut() else {
             self.mode = Mode::Normal;
             return;
@@ -543,7 +794,7 @@ impl App {
         match key.code {
             KeyCode::Esc => self.mode = Mode::Normal,
             KeyCode::Enter => {
-                b.run_search(&mut self.engine);
+                b.run_search(&mut engine.borrow_mut());
                 self.mode = Mode::Normal;
             }
             KeyCode::Backspace => b.backspace(),
@@ -601,42 +852,42 @@ impl App {
                     if text.is_empty() {
                         return Ok("no tags given".into());
                     }
-                    let nids = self.engine.note_ids_for_cards(&cids)?;
-                    let n = self.engine.add_tags(&nids, text)?;
+                    let nids = self.eng().note_ids_for_cards(&cids)?;
+                    let n = self.eng().add_tags(&nids, text)?;
                     format!("tagged {n} note{}", plural(n))
                 }
                 PromptKind::RemoveTag => {
                     if text.is_empty() {
                         return Ok("no tags given".into());
                     }
-                    let nids = self.engine.note_ids_for_cards(&cids)?;
-                    let n = self.engine.remove_tags(&nids, text)?;
+                    let nids = self.eng().note_ids_for_cards(&cids)?;
+                    let n = self.eng().remove_tags(&nids, text)?;
                     format!("untagged {n} note{}", plural(n))
                 }
                 PromptKind::MoveDeck => {
                     if text.is_empty() {
                         return Ok("no deck given".into());
                     }
-                    let Some(id) = self.engine.deck_id_by_name(text, false)? else {
+                    let Some(id) = self.eng().deck_id_by_name(text, false)? else {
                         return Err(anyhow::anyhow!("no deck named {text:?} (create it first)").into());
                     };
-                    let n = self.engine.move_cards(&cids, id)?;
+                    let n = self.eng().move_cards(&cids, id)?;
                     format!("moved {n} card{} to {text}", plural(n))
                 }
                 PromptKind::SetDue => {
                     if text.is_empty() {
                         return Ok("no due date given".into());
                     }
-                    self.engine.set_due(&cids, text)?;
+                    self.eng().set_due(&cids, text)?;
                     format!("set due date on {} card{}", cids.len(), plural(cids.len()))
                 }
                 PromptKind::ConfirmDelete(_) => {
-                    let nids = self.engine.note_ids_for_cards(&cids)?;
-                    let n = self.engine.delete_notes(&nids)?;
+                    let nids = self.eng().note_ids_for_cards(&cids)?;
+                    let n = self.eng().delete_notes(&nids)?;
                     format!("deleted {n} note{}", plural(n))
                 }
                 PromptKind::ConfirmForget(_) => {
-                    self.engine.forget_cards(&cids)?;
+                    self.eng().forget_cards(&cids)?;
                     format!("reset {} card{} to new", cids.len(), plural(cids.len()))
                 }
             })
@@ -663,9 +914,10 @@ impl App {
         if self.mode == Mode::Visual {
             self.mode = Mode::Normal;
         }
+        let engine = self.engine.clone();
         if let Some(b) = self.browser.as_mut() {
             b.anchor = None;
-            b.refresh(&mut self.engine);
+            b.refresh(&mut engine.borrow_mut());
         }
     }
 
@@ -675,7 +927,8 @@ impl App {
         if cids.is_empty() {
             return;
         }
-        match f(&mut self.engine, &cids) {
+        let r = f(&mut self.eng(), &cids);
+        match r {
             Ok(msg) => {
                 self.info(msg);
                 self.after_bulk();
@@ -686,7 +939,7 @@ impl App {
 
     fn open_browser(&mut self, query: String) {
         let mut b = BrowserView::new(query);
-        b.run_search(&mut self.engine);
+        b.run_search(&mut self.eng());
         self.browser = Some(b);
         self.view = View::Browser;
         self.mode = Mode::Normal;
@@ -708,6 +961,7 @@ impl App {
             self.pending.clear();
             self.count = None;
             self.pending_since = None;
+            self.pending_exact = None;
             return;
         }
         if key.code == KeyCode::Esc && self.mode == Mode::Visual {
@@ -719,21 +973,37 @@ impl App {
         }
         self.pending.push(key);
         self.pending_since = Some(Instant::now());
-        match self.keymap().lookup(&self.pending) {
-            Match::Exact(b) => {
-                let action = b.action;
+        let (exact, longer) = match self.keymap().lookup(&self.pending) {
+            Match::Exact(b) => (Some(b.action), self.keymap().has_longer(&self.pending)),
+            Match::Prefix(_) => (None, true),
+            Match::None => (None, false),
+        };
+        match (exact, longer) {
+            (Some(action), false) => {
                 self.pending.clear();
                 self.pending_since = None;
+                self.pending_exact = None;
                 let n = self.count.take().unwrap_or(1);
                 for _ in 0..n.min(500) {
                     self.dispatch(action);
                 }
             }
-            Match::Prefix(_) => {}
-            Match::None => {
+            (Some(action), true) => self.pending_exact = Some(action),
+            (None, true) => {}
+            (None, false) => {
+                // Dead end. If a shorter mapping was waiting, it fires and the
+                // key that broke the sequence is re-read on its own.
                 self.pending.clear();
                 self.pending_since = None;
-                self.count = None;
+                if let Some(action) = self.pending_exact.take() {
+                    let n = self.count.take().unwrap_or(1);
+                    for _ in 0..n.min(500) {
+                        self.dispatch(action);
+                    }
+                    self.on_key_normal(key);
+                } else {
+                    self.count = None;
+                }
             }
         }
     }
@@ -795,9 +1065,10 @@ impl App {
             }
             ("sort", Some(col)) => match ankh_core::SortBy::parse(col) {
                 Some(sb) => {
+                    let engine = self.engine.clone();
                     if let Some(b) = self.browser.as_mut() {
                         b.sort = sb;
-                        b.refresh(&mut self.engine);
+                        b.refresh(&mut engine.borrow_mut());
                     }
                 }
                 None => self.error(format!("unknown sort column {col:?}")),
@@ -820,6 +1091,26 @@ impl App {
             ("info", _) => self.dispatch(Action::CardInfo),
             ("edit" | "e", _) => self.dispatch(Action::EditNote),
             ("add" | "a", _) => self.dispatch(Action::AddNote),
+            ("lua", _) => {
+                let code = cmd.split_once(' ').map(|x| x.1).unwrap_or("");
+                self.lua.set_snapshot(self.snapshot());
+                match self.lua.eval(code) {
+                    Ok(s) if s.is_empty() => {}
+                    Ok(s) => self.info(s),
+                    Err(e) => self.error(e),
+                }
+                self.drain_requests();
+            }
+            ("theme", Some(name)) => match Theme::by_name(name) {
+                Some(t) => self.theme = t,
+                None => self.error(format!("unknown theme {name:?} (have: {})", Theme::NAMES.join(", "))),
+            },
+            (name, _) if self.lua.has_command(name) => {
+                let args = cmd.split_once(' ').map(|x| x.1).unwrap_or("").to_string();
+                self.lua.set_snapshot(self.snapshot());
+                self.lua.run_command(name, &args);
+                self.drain_requests();
+            }
             _ => self.error(format!("not a command: {cmd}")),
         }
     }
@@ -841,7 +1132,8 @@ impl App {
                     self.refresh();
                     return;
                 }
-                if self.creds.is_some() && self.sync.is_none() {
+                self.emit("quit", |_| Ok(mlua::Value::Nil));
+                if self.creds.is_some() && self.sync.is_none() && self.config.sync_on_quit {
                     self.start_sync(SyncOp::Normal, true);
                 } else if self.sync.is_some() {
                     self.sync.as_mut().unwrap().quit_after = true;
@@ -931,7 +1223,7 @@ impl App {
                     self.show_answer();
                 }
             }
-            Action::Undo => match self.engine.undo() {
+            Action::Undo => match self.undo_result() {
                 Ok(Some(what)) => {
                     self.info(format!("undid: {what}"));
                     if self.view == View::Review {
@@ -944,17 +1236,18 @@ impl App {
                 Err(e) => self.error(e.to_string()),
             },
             Action::Bury => self.with_current_card(|app, c| {
-                app.engine.bury(c.card_id)?;
+                app.eng().bury(c.card_id)?;
                 Ok("card buried".into())
             }),
             Action::Suspend => self.with_current_card(|app, c| {
-                app.engine.suspend(c.card_id)?;
+                app.eng().suspend(c.card_id)?;
                 Ok("card suspended".into())
             }),
             Action::Flag(n) => {
                 let Some(card) = self.review.as_ref().and_then(|r| r.card.clone()) else { return };
                 let new = if card.flag == n { 0 } else { n };
-                match self.engine.set_flag(card.card_id, new) {
+                let r = self.eng().set_flag(card.card_id, new);
+                match r {
                     Ok(()) => {
                         if let Some(c) = self.review.as_mut().and_then(|r| r.card.as_mut()) {
                             c.flag = new;
@@ -965,7 +1258,8 @@ impl App {
             }
             Action::ToggleMark => {
                 let Some(card) = self.review.as_ref().and_then(|r| r.card.clone()) else { return };
-                match self.engine.toggle_marked(card.note_id) {
+                let r = self.eng().toggle_marked(card.note_id);
+                match r {
                     Ok(marked) => {
                         if let Some(c) = self.review.as_mut().and_then(|r| r.card.as_mut()) {
                             if marked {
@@ -987,7 +1281,7 @@ impl App {
                 };
                 self.play(&av);
             }
-            Action::Unbury => match self.engine.unbury_current_deck() {
+            Action::Unbury => match self.unbury_result() {
                 Ok(()) => {
                     self.info("unburied");
                     if self.view == View::Review {
@@ -1082,7 +1376,8 @@ impl App {
                         return;
                     }
                 }
-                match self.engine.card_info(id) {
+                let r = self.eng().card_info(id);
+                match r {
                     Ok(info) => {
                         if let Some(b) = self.browser.as_mut() {
                             b.info = Some(info);
@@ -1151,14 +1446,21 @@ impl App {
                 }
             }
             Action::CycleSort => {
+                let engine = self.engine.clone();
                 if let Some(b) = self.browser.as_mut() {
-                    b.cycle_sort(&mut self.engine);
+                    b.cycle_sort(&mut engine.borrow_mut());
                 }
             }
             Action::ReverseSort => {
+                let engine = self.engine.clone();
                 if let Some(b) = self.browser.as_mut() {
-                    b.toggle_reverse(&mut self.engine);
+                    b.toggle_reverse(&mut engine.borrow_mut());
                 }
+            }
+            Action::Lua(idx) => {
+                self.lua.set_snapshot(self.snapshot());
+                self.lua.call_action(idx);
+                self.drain_requests();
             }
             Action::EditNote => {
                 let note_id = match self.view {
@@ -1183,11 +1485,12 @@ impl App {
             Action::StudyCard => {
                 // Open the current row's deck in review.
                 let Some(row) = self.browser.as_ref().and_then(|b| b.current().cloned()) else { return };
-                if let Err(e) = self.engine.select_deck(row.deck_id) {
+                let selected = self.eng().select_deck(row.deck_id);
+                if let Err(e) = selected {
                     self.error(e.to_string());
                     return;
                 }
-                let mut rv = ReviewView::new(row.deck, self.engine.paths().media_folder());
+                let mut rv = ReviewView::new(row.deck, self.eng().paths().media_folder());
                 rv.session_started = Instant::now();
                 self.review = Some(rv);
                 self.view = View::Review;
@@ -1225,8 +1528,10 @@ impl App {
                 }
             }
             View::Browser => {
+                let engine = self.engine.clone();
+                let insert = self.mode == Mode::Insert;
                 if let Some(b) = self.browser.as_mut() {
-                    b.draw(f, chunks[0], &theme, &mut self.engine, self.mode == Mode::Insert);
+                    b.draw(f, chunks[0], &theme, &mut engine.borrow_mut(), insert);
                 }
             }
         }
@@ -1333,7 +1638,7 @@ impl App {
         const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let spinner = SPIN[(self.tick / 2) as usize % SPIN.len()];
         let elapsed = self.sync.as_ref().map(|s| s.started.elapsed()).unwrap_or_default();
-        let detail = match self.engine.sync_progress() {
+        let detail = match self.eng().sync_progress() {
             SyncProgress::Idle | SyncProgress::Connecting => "connecting to AnkiWeb".to_string(),
             SyncProgress::Collection { stage, added, removed } => {
                 format!("{stage} · {added} changed, {removed} removed")
@@ -1384,6 +1689,13 @@ impl App {
             " :browse QUERY  :sort COL  :tag T  :untag T  :move DECK  :due N",
             theme.muted(),
         )));
+        lines.push(Line::from(Span::styled(" :lua CODE  :theme NAME  :edit  :add", theme.muted())));
+        for (name, desc) in self.lua.command_names() {
+            lines.push(Line::from(vec![
+                Span::styled(format!(" :{name:<9}"), theme.accent()),
+                Span::raw(desc.unwrap_or_default()),
+            ]));
+        }
         let rect = centered(area, 52, lines.len() as u16 + 2);
         let block = Block::default()
             .borders(Borders::ALL)
@@ -1433,114 +1745,24 @@ fn full_sync_prompt(upload_ok: bool, download_ok: bool) -> Prompt {
     }
 }
 
-fn default_keymaps() -> HashMap<View, Keymap<Action>> {
-    let mut global = Keymap::default();
-    global
-        .bind("j", Action::Down, "down")
-        .bind("<Down>", Action::Down, "down")
-        .bind("k", Action::Up, "up")
-        .bind("<Up>", Action::Up, "up")
-        .bind("gg", Action::Top, "top")
-        .bind("G", Action::Bottom, "bottom")
-        .bind("S", Action::Sync, "sync")
-        .bind("<leader>ss", Action::Sync, "sync")
-        .bind("<leader>sd", Action::SyncDownload, "sync: full download")
-        .bind("<leader>su", Action::SyncUpload, "sync: full upload")
-        .bind("u", Action::Undo, "undo")
-        .bind(":", Action::CommandMode, "command line")
-        .bind("?", Action::Help, "help")
-        .bind("q", Action::Quit, "quit / back")
-        .bind("ZZ", Action::Quit, "quit (syncs first)")
-        .bind("ZQ", Action::ForceQuit, "quit without syncing")
-        .bind("<Esc>", Action::ClearMessage, "clear message");
-
-    let mut decks = global.clone();
-    decks
-        .bind("/", Action::BrowseDeck, "browse this deck")
-        .bind("b", Action::OpenBrowser, "browser")
-        .bind("a", Action::AddNote, "add note to deck")
-        .bind("<C-d>", Action::HalfDown, "half page down")
-        .bind("<C-u>", Action::HalfUp, "half page up")
-        .bind("l", Action::Expand, "expand")
-        .bind("h", Action::Collapse, "collapse / parent")
-        .bind("za", Action::ToggleFold, "toggle fold")
-        .bind("<CR>", Action::Open, "study deck")
-        .bind("R", Action::Refresh, "refresh");
-
-    let mut review = global.clone();
-    review
-        .bind("<Space>", Action::Continue, "show answer / good")
-        .bind("<CR>", Action::Continue, "show answer / good")
-        .bind("l", Action::ShowAnswer, "show answer")
-        .bind("1", Action::Rate(Rating::Again), "again")
-        .bind("2", Action::Rate(Rating::Hard), "hard")
-        .bind("3", Action::Rate(Rating::Good), "good")
-        .bind("4", Action::Rate(Rating::Easy), "easy")
-        .bind("a", Action::Rate(Rating::Again), "again")
-        .bind("h", Action::Rate(Rating::Hard), "hard")
-        .bind("g", Action::Rate(Rating::Good), "good")
-        .bind("e", Action::Rate(Rating::Easy), "easy")
-        .bind("-", Action::Bury, "bury card")
-        .bind("!", Action::Suspend, "suspend card")
-        .bind("*", Action::ToggleMark, "mark / unmark note")
-        .bind("r", Action::Replay, "replay audio")
-        .bind("H", Action::ToggleHints, "reveal / hide hints")
-        .bind("i", Action::CardInfo, "card info")
-        .bind("/", Action::BrowseDeck, "browse this deck")
-        .bind("<leader>e", Action::EditNote, "edit note in $EDITOR")
-        .bind("<leader>a", Action::AddNote, "add note to deck")
-        .bind("U", Action::Unbury, "unbury deck")
-        .bind("<BS>", Action::Back, "back to decks")
-        .bind("<C-d>", Action::ScrollDown, "scroll down")
-        .bind("<C-u>", Action::ScrollUp, "scroll up")
-        .bind("<leader>0", Action::Flag(0), "clear flag")
-        .bind("<leader>1", Action::Flag(1), "flag red")
-        .bind("<leader>2", Action::Flag(2), "flag orange")
-        .bind("<leader>3", Action::Flag(3), "flag green")
-        .bind("<leader>4", Action::Flag(4), "flag blue")
-        .bind("<leader>5", Action::Flag(5), "flag pink")
-        .bind("<leader>6", Action::Flag(6), "flag turquoise")
-        .bind("<leader>7", Action::Flag(7), "flag purple");
-    // `gg` conflicts with `g` (good); in review `g` wins and top/bottom use G only.
-    review.unbind(&super::keys::parse_seq("gg").unwrap());
-
-    let mut browser = global.clone();
-    browser
-        .bind("/", Action::InsertMode, "edit search")
-        .bind("i", Action::InsertMode, "edit search")
-        .bind("<C-l>", Action::ClearSearch, "new search")
-        .bind("v", Action::VisualMode, "visual select")
-        .bind("V", Action::VisualMode, "visual select")
-        .bind("<C-d>", Action::HalfDown, "half page down")
-        .bind("<C-u>", Action::HalfUp, "half page up")
-        .bind("p", Action::Preview, "toggle preview")
-        .bind("<Tab>", Action::FlipPreview, "preview question / answer")
-        .bind("<CR>", Action::StudyCard, "study this card's deck")
-        .bind("I", Action::CardInfo, "card info")
-        .bind("e", Action::EditNote, "edit note in $EDITOR")
-        .bind("a", Action::AddNote, "add note")
-        .bind("!", Action::ToggleSuspend, "suspend / unsuspend")
-        .bind("-", Action::BulkBury, "bury")
-        .bind("*", Action::BulkMark, "mark / unmark")
-        .bind("t", Action::PromptTag, "add tags")
-        .bind("T", Action::PromptUntag, "remove tags")
-        .bind("m", Action::PromptMove, "move to deck")
-        .bind("d", Action::PromptDue, "set due date")
-        .bind("D", Action::ConfirmDelete, "delete notes")
-        .bind("F", Action::ConfirmForget, "forget (reset to new)")
-        .bind("o", Action::CycleSort, "next sort column")
-        .bind("O", Action::ReverseSort, "reverse sort")
-        .bind("<BS>", Action::Back, "back to decks")
-        .bind("<leader>0", Action::BulkFlag(0), "clear flag")
-        .bind("<leader>1", Action::BulkFlag(1), "flag red")
-        .bind("<leader>2", Action::BulkFlag(2), "flag orange")
-        .bind("<leader>3", Action::BulkFlag(3), "flag green")
-        .bind("<leader>4", Action::BulkFlag(4), "flag blue")
-        .bind("<leader>5", Action::BulkFlag(5), "flag pink")
-        .bind("<leader>6", Action::BulkFlag(6), "flag turquoise")
-        .bind("<leader>7", Action::BulkFlag(7), "flag purple");
-
-    HashMap::from([(View::Decks, decks), (View::Review, review), (View::Browser, browser)])
+/// Merge the Lua-defined "global" bindings under each view's own.
+fn compose_keymaps(
+    by_name: &HashMap<String, Keymap<Action>>,
+    deletions: &crate::lua::Deletions,
+) -> HashMap<View, Keymap<Action>> {
+    let global = by_name.get("global").cloned().unwrap_or_default();
+    let mut out = HashMap::new();
+    for (view, name) in [(View::Decks, "decks"), (View::Review, "review"), (View::Browser, "browser")] {
+        let mut km = global.clone();
+        if let Some(own) = by_name.get(name) {
+            km.extend(own);
+        }
+        for seq in deletions.get(name).into_iter().flatten() {
+            km.unbind(seq);
+        }
+        out.insert(view, km);
+    }
+    out
 }
 
 fn plural(n: usize) -> &'static str {
