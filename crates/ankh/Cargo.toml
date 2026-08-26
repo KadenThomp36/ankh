@@ -22,6 +22,7 @@ tracing-subscriber.workspace = true
 chrono.workspace = true
 unicode-width.workspace = true
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+clap_complete = "4"
 ratatui = "0.30"
 rpassword = "7"
 figlet-rs = "0.1"

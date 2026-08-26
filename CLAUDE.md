@@ -23,6 +23,10 @@ anything non-trivial.
   (ratatui app: `app.rs` loop, `keys.rs` notation + trie, `theme.rs`,
   `banner.rs`, `views/`).
 
+- `docs/help/*.md` and `docs/lua.md` / `docs/cli.md` are compiled into the
+  binary (`tui/views/help.rs`) and rendered through `ankh-render`; keep them
+  plain Markdown (headings, tables, lists, code).
+
 ## Rules
 
 - Every TUI action has a headless equivalent; every command supports

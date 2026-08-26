@@ -32,7 +32,7 @@ pub fn run(cmd: Command, paths: Paths, format: Format) -> i32 {
 
 fn dispatch(cmd: Command, paths: Paths, out: &Out) -> Result<()> {
     match cmd {
-        Command::Tui => unreachable!(),
+        Command::Tui | Command::Completions { .. } => unreachable!(),
         Command::Login { username, password_stdin } => login(paths, username, password_stdin, out),
         Command::Logout => {
             AuthStore::new(&paths.profile).clear()?;

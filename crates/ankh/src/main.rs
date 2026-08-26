@@ -195,6 +195,8 @@ pub enum Command {
     },
     /// List notetypes and their fields
     Notetypes,
+    /// Print shell completions (bash, zsh, fish, elvish, powershell)
+    Completions { shell: clap_complete::Shell },
     /// Show config paths, or dump the built-in defaults.lua
     Config {
         /// Print the embedded defaults.lua (copy it to init.lua to customise)
@@ -243,6 +245,11 @@ fn main() {
     cli::init_logging(&paths);
     let code = match cli.command.unwrap_or(Command::Tui) {
         Command::Tui => tui::run(paths),
+        Command::Completions { shell } => {
+            use clap::CommandFactory;
+            clap_complete::generate(shell, &mut Cli::command(), "ankh", &mut std::io::stdout());
+            0
+        }
         cmd => cli::run(cmd, paths, cli.format),
     };
     std::process::exit(code);

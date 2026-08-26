@@ -21,6 +21,7 @@ use super::keys::{format_seq, Key, Keymap, Match};
 use super::theme::Theme;
 use super::views::browser::BrowserView;
 use super::views::decks::DecksView;
+use super::views::help::HelpView;
 use super::views::review::{ReviewView, Stage};
 use super::views::stats::StatsView;
 use crate::lua::{Config, Request, Runtime, Snapshot};
@@ -253,6 +254,7 @@ pub enum View {
     Review,
     Browser,
     Stats,
+    Help,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,6 +341,7 @@ pub struct App {
     review: Option<ReviewView>,
     browser: Option<BrowserView>,
     stats: Option<StatsView>,
+    help: Option<HelpView>,
     audio: Player,
     images: Images,
     keymaps: HashMap<View, Keymap<Action>>,
@@ -370,7 +373,12 @@ impl App {
         let lua = Runtime::new(engine.clone(), Some(init_lua));
         let config = lua.config();
         let lua_errors = lua.errors();
-        let theme = Theme::by_name(&config.theme).unwrap_or_else(Theme::tokyonight);
+        let mut theme = Theme::by_name(&config.theme).unwrap_or_else(Theme::tokyonight);
+        theme.dark = match config.background.as_str() {
+            "light" => false,
+            "dark" => true,
+            _ => super::theme::terminal_is_dark(),
+        };
         let mut audio = Player::new();
         audio.enabled = config.audio_autoplay;
         let (maps, deletions) = lua.keymaps();
@@ -385,6 +393,7 @@ impl App {
             review: None,
             browser: None,
             stats: None,
+            help: None,
             audio,
             images,
             keymaps,
@@ -620,7 +629,7 @@ impl App {
                     b.refresh(&mut engine.borrow_mut());
                 }
             }
-            View::Decks | View::Stats => self.refresh(),
+            View::Decks | View::Stats | View::Help => self.refresh(),
         }
     }
 
@@ -633,6 +642,7 @@ impl App {
                 View::Review => "review",
                 View::Browser => "browser",
                 View::Stats => "stats",
+                View::Help => "help",
             }
             .into(),
             mode: self.mode.label().to_lowercase(),
@@ -642,7 +652,7 @@ impl App {
                 View::Decks => self.decks.selected_deck().map(|d| d.full_name.clone()),
                 View::Review => self.review.as_ref().map(|r| r.deck_name.clone()),
                 View::Browser => self.browser.as_ref().and_then(|b| b.current().map(|r| r.deck.clone())),
-                View::Stats => None,
+                View::Stats | View::Help => None,
             },
         }
     }
@@ -687,7 +697,8 @@ impl App {
     }
 
     fn keymap(&self) -> &Keymap<Action> {
-        &self.keymaps[&self.view]
+        static EMPTY: std::sync::OnceLock<Keymap<Action>> = std::sync::OnceLock::new();
+        self.keymaps.get(&self.view).unwrap_or_else(|| EMPTY.get_or_init(Keymap::default))
     }
 
     // ----- review flow -------------------------------------------------------
@@ -1128,7 +1139,10 @@ impl App {
             ("sync", Some("download" | "down" | "pull")) => self.dispatch(Action::SyncDownload),
             ("sync", Some("upload" | "up" | "push")) => self.dispatch(Action::SyncUpload),
             ("refresh" | "r", _) => self.dispatch(Action::Refresh),
-            ("help" | "h", _) => self.dispatch(Action::Help),
+            ("help" | "h", topic) => {
+                self.help = Some(HelpView::new(topic));
+                self.view = View::Help;
+            }
             ("undo" | "u", _) => self.dispatch(Action::Undo),
             ("bury", _) => self.dispatch(Action::Bury),
             ("suspend", _) => self.dispatch(Action::Suspend),
@@ -1230,9 +1244,10 @@ impl App {
                     self.leave_review();
                     return;
                 }
-                if self.view == View::Stats {
+                if self.view == View::Stats || self.view == View::Help {
                     self.view = View::Decks;
                     self.stats = None;
+                    self.help = None;
                     return;
                 }
                 if self.view == View::Browser {
@@ -1268,6 +1283,11 @@ impl App {
                         s.scroll = s.scroll.saturating_add(1);
                     }
                 }
+                View::Help => {
+                    if let Some(h) = self.help.as_mut() {
+                        h.scroll = h.scroll.saturating_add(1);
+                    }
+                }
             },
             Action::Up => match self.view {
                 View::Decks => self.decks.move_by(-1),
@@ -1280,6 +1300,11 @@ impl App {
                 View::Stats => {
                     if let Some(s) = self.stats.as_mut() {
                         s.scroll = s.scroll.saturating_sub(1);
+                    }
+                }
+                View::Help => {
+                    if let Some(h) = self.help.as_mut() {
+                        h.scroll = h.scroll.saturating_sub(1);
                     }
                 }
             },
@@ -1300,6 +1325,11 @@ impl App {
                         s.scroll = 0;
                     }
                 }
+                View::Help => {
+                    if let Some(h) = self.help.as_mut() {
+                        h.scroll = 0;
+                    }
+                }
             },
             Action::Bottom => match self.view {
                 View::Decks => self.decks.go_bottom(),
@@ -1316,6 +1346,11 @@ impl App {
                 View::Stats => {
                     if let Some(s) = self.stats.as_mut() {
                         s.scroll = u16::MAX / 2;
+                    }
+                }
+                View::Help => {
+                    if let Some(h) = self.help.as_mut() {
+                        h.scroll = u16::MAX / 2;
                     }
                 }
             },
@@ -1424,9 +1459,10 @@ impl App {
                 Err(e) => self.error(e.to_string()),
             },
             Action::Back => match self.view {
-                View::Stats => {
+                View::Stats | View::Help => {
                     self.view = View::Decks;
                     self.stats = None;
+                    self.help = None;
                 }
                 View::Review => self.leave_review(),
                 View::Browser => {
@@ -1464,7 +1500,7 @@ impl App {
                     View::Review => {
                         self.review.as_ref().map(|r| format!("deck:\"{}\"", r.deck_name)).unwrap_or_default()
                     }
-                    View::Browser | View::Stats => String::new(),
+                    View::Browser | View::Stats | View::Help => String::new(),
                 };
                 self.open_browser(q);
             }
@@ -1504,7 +1540,7 @@ impl App {
                 let id = match self.view {
                     View::Browser => self.browser.as_ref().and_then(|b| b.current_id()),
                     View::Review => self.review.as_ref().and_then(|r| r.card.as_ref().map(|c| c.card_id)),
-                    View::Decks | View::Stats => None,
+                    View::Decks | View::Stats | View::Help => None,
                 };
                 let Some(id) = id else { return };
                 if let Some(b) = self.browser.as_mut() {
@@ -1611,7 +1647,7 @@ impl App {
                             Some(b) if !b.query.is_empty() => (b.query.clone(), b.query.clone()),
                             _ => ("whole collection".into(), String::new()),
                         },
-                        View::Stats => return,
+                        View::Stats | View::Help => return,
                     }
                 };
                 let r = self.eng().stats(&search, 365);
@@ -1628,7 +1664,7 @@ impl App {
                     View::Decks => self.decks.selected_deck().map(|d| d.id),
                     View::Review => self.review.as_ref().and_then(|r| r.card.as_ref().map(|c| c.deck_id)),
                     View::Browser => self.browser.as_ref().and_then(|b| b.current().map(|r| r.deck_id)),
-                    View::Stats => None,
+                    View::Stats | View::Help => None,
                 };
                 match deck {
                     Some(id) => self.edit_request = Some(EditRequest::Options { deck: id }),
@@ -1677,7 +1713,7 @@ impl App {
                 let note_id = match self.view {
                     View::Review => self.review.as_ref().and_then(|r| r.card.as_ref().map(|c| c.note_id)),
                     View::Browser => self.browser.as_ref().and_then(|b| b.current().map(|r| r.note_id)),
-                    View::Decks | View::Stats => None,
+                    View::Decks | View::Stats | View::Help => None,
                 };
                 match note_id {
                     Some(id) => self.edit_request = Some(EditRequest::Existing { note_id: id }),
@@ -1689,7 +1725,7 @@ impl App {
                     View::Decks => self.decks.selected_deck().map(|d| d.full_name.clone()),
                     View::Review => self.review.as_ref().map(|r| r.deck_name.clone()),
                     View::Browser => self.browser.as_ref().and_then(|b| b.current().map(|r| r.deck.clone())),
-                    View::Stats => None,
+                    View::Stats | View::Help => None,
                 }
                 .unwrap_or_else(|| "Default".into());
                 self.edit_request = Some(EditRequest::New { deck });
@@ -1749,6 +1785,11 @@ impl App {
             View::Stats => {
                 if let Some(s) = self.stats.as_mut() {
                     s.draw(f, chunks[0], &theme);
+                }
+            }
+            View::Help => {
+                if let Some(h) = self.help.as_mut() {
+                    h.draw(f, chunks[0], &theme);
                 }
             }
         }
@@ -1973,9 +2014,13 @@ fn compose_keymaps(
 ) -> HashMap<View, Keymap<Action>> {
     let global = by_name.get("global").cloned().unwrap_or_default();
     let mut out = HashMap::new();
-    for (view, name) in
-        [(View::Decks, "decks"), (View::Review, "review"), (View::Browser, "browser"), (View::Stats, "stats")]
-    {
+    for (view, name) in [
+        (View::Decks, "decks"),
+        (View::Review, "review"),
+        (View::Browser, "browser"),
+        (View::Stats, "stats"),
+        (View::Help, "help"),
+    ] {
         let mut km = global.clone();
         if let Some(own) = by_name.get(name) {
             km.extend(own);

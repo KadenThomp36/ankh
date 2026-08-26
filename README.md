@@ -29,16 +29,28 @@ Early. Milestones, in order:
 - [x] **5 · editor** — notes as Markdown + frontmatter in `$EDITOR` (lossless: un-round-trippable HTML stays raw), batch add, `ankh export`/`import` for git-able decks, nvim ftplugin
 - [x] **6 · Lua** — embedded Lua 5.4: `init.lua`, `ankh.setup`, keymaps to actions or functions, events, `:Commands`, `:lua`, read/act API, plugins on `package.path`, six themes
 - [x] **7 · management** — deck create/rename/delete, options preset as TOML in `$EDITOR`, FSRS optimise, stats view (calendar heatmap, forecast, counts, answers, hours, intervals), `.apkg` export/import, CSV import
-- [ ] **8 · polish** — `:help`, themes, release binaries
+- [x] **8 · polish** — embedded `:help`, shell completions, release workflow, themes
 
 ## Install
 
-Until there are release binaries:
+Prebuilt binaries for Linux (x86_64, aarch64) and macOS (arm64, x86_64) are
+attached to each [release](https://github.com/KadenThomp36/ankh/releases):
 
 ```sh
-# needs: rust (stable), protoc, pkg-config, libdbus (linux)
+tar xzf ankh-*.tar.gz && install -m755 ankh-*/ankh ~/.local/bin/
+ankh completions zsh > ~/.zfunc/_ankh      # bash · zsh · fish · elvish · powershell
+```
+
+From source (needs a stable Rust toolchain, `protoc`, `pkg-config`, and
+`libdbus-1-dev` on Linux):
+
+```sh
 cargo install --git https://github.com/KadenThomp36/ankh ankh
 ```
+
+Card audio uses `mpv` (or `ffplay`) if installed. Images need a terminal that
+speaks Kitty, Sixel or iTerm2 graphics (ghostty, kitty, wezterm, foot,
+iTerm2…); anything else gets half-block art.
 
 ## Use
 
@@ -51,7 +63,7 @@ ankh decks --format json | jq '.data[] | select(.review > 0) | .name'
 
 Inside the TUI: `j`/`k` move, `h`/`l` fold, `Enter` studies a deck, `S` sync,
 `<Space>` opens which-key, `:` for the command line, `?` for the current
-view's keymap, `q` goes back / syncs and quits.
+view's keymap, `:help` for the manual, `q` goes back / syncs and quits.
 
 Reviewing: `Space` shows the answer and then rates *good*; `1`–`4` (or
 `a`/`h`/`g`/`e`) rate; `u` undo; `-` bury; `!` suspend; `*` mark; `r` replay

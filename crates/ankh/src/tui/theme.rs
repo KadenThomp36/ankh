@@ -240,3 +240,12 @@ pub enum CountKind {
     Learn,
     Review,
 }
+
+/// Best-effort guess without querying the terminal: `COLORFGBG` (set by
+/// rxvt, konsole, some others) is "fg;bg" with bg ≤ 6 meaning dark.
+pub fn terminal_is_dark() -> bool {
+    match std::env::var("COLORFGBG") {
+        Ok(v) => v.rsplit(';').next().and_then(|bg| bg.parse::<u8>().ok()).map(|bg| bg <= 6 || bg == 8).unwrap_or(true),
+        Err(_) => true,
+    }
+}

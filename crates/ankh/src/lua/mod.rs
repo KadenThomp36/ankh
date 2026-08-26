@@ -25,6 +25,8 @@ pub type Deletions = HashMap<String, Vec<Vec<crate::tui::keys::Key>>>;
 #[derive(Debug, Clone)]
 pub struct Config {
     pub theme: String,
+    /// "dark" | "light" | "auto"
+    pub background: String,
     pub leader: String,
     pub timeoutlen_ms: u64,
     pub sync_on_launch: bool,
@@ -40,6 +42,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             theme: "tokyonight".into(),
+            background: "auto".into(),
             leader: "<Space>".into(),
             timeoutlen_ms: 1000,
             sync_on_launch: true,
@@ -357,6 +360,7 @@ impl Runtime {
                     let as_str = |v: &Value| lua_to_string(v);
                     match key.as_str() {
                         "theme" => c.theme = as_str(&val),
+                        "background" => c.background = as_str(&val),
                         "leader" => c.leader = as_str(&val),
                         "timeoutlen" => c.timeoutlen_ms = as_str(&val).parse().unwrap_or(1000),
                         "sync.on_launch" => c.sync_on_launch = as_bool(&val),
@@ -381,6 +385,7 @@ impl Runtime {
                     let c = &st.config;
                     Ok(match key.as_str() {
                         "theme" => Value::String(lua.create_string(&c.theme)?),
+                        "background" => Value::String(lua.create_string(&c.background)?),
                         "leader" => Value::String(lua.create_string(&c.leader)?),
                         "timeoutlen" => Value::Integer(c.timeoutlen_ms as i64),
                         "sync.on_launch" => Value::Boolean(c.sync_on_launch),

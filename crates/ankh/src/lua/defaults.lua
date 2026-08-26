@@ -100,6 +100,7 @@ _G.ankh = ankh
 
 ankh.setup({
   theme = "tokyonight",          -- tokyonight · catppuccin · gruvbox · rose-pine · nord · dracula
+  background = "auto",           -- "dark" | "light" | "auto" (COLORFGBG); only affects card colour safety
   leader = "<Space>",
   timeoutlen = 1000,             -- ms to wait for the rest of a key sequence
   sync = { on_launch = true, on_quit = true, media = true },
@@ -210,8 +211,11 @@ map("browser", "O", "reverse_sort", { desc = "reverse sort" })
 map("browser", "<BS>", "back", { desc = "back to decks" })
 map("browser", "<leader>s", "stats", { desc = "stats for this search" })
 
--- stats
+-- stats & help
 map("stats", "<BS>", "back", { desc = "back to decks" })
+map("help", "<BS>", "back", { desc = "back to decks" })
+map("help", "<C-d>", "down", { desc = "scroll down" })
+map("help", "<C-u>", "up", { desc = "scroll up" })
 map("stats", "<C-d>", "down", { desc = "scroll down" })
 map("stats", "<C-u>", "up", { desc = "scroll up" })
 for n = 0, 7 do
