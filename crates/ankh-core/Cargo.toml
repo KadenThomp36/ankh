@@ -1,0 +1,21 @@
+[package]
+name = "ankh-core"
+description = "Engine layer for ankh: wraps Anki's rslib with a small, stable domain API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anki.workspace = true
+anki_proto.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+directories.workspace = true
+keyring.workspace = true
+tracing.workspace = true
+chrono.workspace = true

@@ -1,0 +1,37 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/KadenThomp36/ankh"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Anki's own Rust backend. Pinned to a release tag; bump deliberately (see docs/adr/0001).
+anki = { git = "https://github.com/ankitects/anki.git", tag = "26.08.1", features = ["rustls"] }
+anki_proto = { git = "https://github.com/ankitects/anki.git", tag = "26.08.1" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots", "json"] }
+directories = "6"
+keyring = "4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = "0.4"
+unicode-width = "0.2"
+unicode-segmentation = "1"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

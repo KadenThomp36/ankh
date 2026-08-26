@@ -1,0 +1,27 @@
+[package]
+name = "ankh"
+description = "A neovim-flavoured Anki client for the terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+default-run = "ankh"
+
+[[bin]]
+name = "ankh"
+path = "src/main.rs"
+
+[dependencies]
+ankh-core = { path = "../ankh-core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true
+unicode-width.workspace = true
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+ratatui = "0.30"
+rpassword = "7"
+figlet-rs = "0.1"
+comfy-table = "7"
