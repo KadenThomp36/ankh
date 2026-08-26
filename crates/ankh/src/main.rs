@@ -70,6 +70,54 @@ pub enum Command {
         /// Deck name (`Korean::Vocab`); defaults to the current deck
         deck: Option<String>,
     },
+    /// Search cards with Anki's search syntax
+    Search {
+        /// e.g. `deck:Korean is:due tag:leech`
+        query: Vec<String>,
+        /// field | deck | due | interval | ease | reps | lapses | created | modified | tags | notetype
+        #[arg(long, default_value = "field")]
+        sort: String,
+        #[arg(long)]
+        reverse: bool,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+    /// Show everything about one card (stats, FSRS state, review log)
+    Card { card_id: i64 },
+    /// Apply an operation to every card matching a search
+    Bulk {
+        query: Vec<String>,
+        #[arg(long, group = "op")]
+        suspend: bool,
+        #[arg(long, group = "op")]
+        unsuspend: bool,
+        #[arg(long, group = "op")]
+        bury: bool,
+        /// 0 clears; 1-7 = red orange green blue pink turquoise purple
+        #[arg(long, group = "op", value_name = "N")]
+        flag: Option<u8>,
+        /// Space-separated tags to add
+        #[arg(long, group = "op", value_name = "TAGS")]
+        tag: Option<String>,
+        /// Space-separated tags to remove
+        #[arg(long, group = "op", value_name = "TAGS")]
+        untag: Option<String>,
+        /// Move cards to a deck (created if missing)
+        #[arg(long = "move", group = "op", value_name = "DECK")]
+        move_to: Option<String>,
+        /// Reset to new, keeping history
+        #[arg(long, group = "op")]
+        forget: bool,
+        /// Anki due spec: 0, 3, 1-7, 2!
+        #[arg(long, group = "op", value_name = "DAYS")]
+        due: Option<String>,
+        /// Delete the matching notes and all their cards
+        #[arg(long, group = "op")]
+        delete: bool,
+        /// Skip the confirmation for --delete
+        #[arg(long)]
+        yes: bool,
+    },
     /// Answer a card previously shown by `next`
     Answer {
         card_id: i64,
@@ -82,6 +130,11 @@ pub enum Command {
 }
 
 fn main() {
+    // `ankh search … | head` must not panic on a closed pipe.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     let paths = ankh_core::Paths::resolve(cli.profile.as_deref(), cli.collection.as_deref());
     cli::init_logging(&paths);

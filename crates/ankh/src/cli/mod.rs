@@ -54,6 +54,34 @@ fn dispatch(cmd: Command, paths: Paths, out: &Out) -> Result<()> {
         }
         Command::Decks => decks(paths, out),
         Command::Next { deck } => next(paths, deck, out),
+        Command::Search { query, sort, reverse, limit } => search(paths, &query.join(" "), &sort, reverse, limit, out),
+        Command::Card { card_id } => card(paths, card_id, out),
+        Command::Bulk { query, suspend, unsuspend, bury, flag, tag, untag, move_to, forget, due, delete, yes } => {
+            let op = if suspend {
+                BulkOp::Suspend
+            } else if unsuspend {
+                BulkOp::Unsuspend
+            } else if bury {
+                BulkOp::Bury
+            } else if let Some(n) = flag {
+                BulkOp::Flag(n)
+            } else if let Some(t) = tag {
+                BulkOp::Tag(t)
+            } else if let Some(t) = untag {
+                BulkOp::Untag(t)
+            } else if let Some(d) = move_to {
+                BulkOp::Move(d)
+            } else if forget {
+                BulkOp::Forget
+            } else if let Some(d) = due {
+                BulkOp::Due(d)
+            } else if delete {
+                BulkOp::Delete { yes }
+            } else {
+                return Err(anyhow::anyhow!("bulk needs an operation flag (see --help)").into());
+            };
+            bulk(paths, &query.join(" "), op, out)
+        }
         Command::Answer { card_id, rating, secs } => answer(paths, card_id, &rating, secs, out),
     }
 }
@@ -259,5 +287,153 @@ fn decks(paths: Paths, out: &Out) -> Result<()> {
         || serde_json::to_value(&tree.roots).unwrap(),
         || tree.all().into_iter().map(|d| serde_json::to_value(d).unwrap()).collect(),
     );
+    Ok(())
+}
+
+enum BulkOp {
+    Suspend,
+    Unsuspend,
+    Bury,
+    Flag(u8),
+    Tag(String),
+    Untag(String),
+    Move(String),
+    Forget,
+    Due(String),
+    Delete { yes: bool },
+}
+
+fn search(paths: Paths, query: &str, sort: &str, reverse: bool, limit: usize, out: &Out) -> Result<()> {
+    let sort = ankh_core::SortBy::parse(sort).ok_or_else(|| anyhow::anyhow!("unknown sort column {sort:?}"))?;
+    let mut eng = Engine::open(paths)?;
+    let ids = eng.search(query, sort, reverse)?;
+    let total = ids.len();
+    let page: Vec<i64> = ids.into_iter().take(limit).collect();
+    let rows = eng.browser_rows(&page)?;
+    eng.close()?;
+    let table: Vec<Vec<String>> = rows
+        .iter()
+        .map(|r| {
+            vec![
+                r.card_id.to_string(),
+                r.sort_field.chars().take(48).collect(),
+                r.deck.rsplit("::").next().unwrap_or("").to_string(),
+                format!("{:?}", r.state).to_lowercase(),
+                r.due.clone(),
+                r.interval_days.to_string(),
+                r.tags.join(" "),
+            ]
+        })
+        .collect();
+    if total > limit && matches!(out.format(), Format::Table) {
+        eprintln!("showing {limit} of {total} (use --limit)");
+    }
+    out.table(
+        &["id", "field", "deck", "state", "due", "ivl", "tags"],
+        table,
+        || serde_json::json!({ "total": total, "query": query, "cards": rows }),
+        || rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect(),
+    );
+    Ok(())
+}
+
+fn card(paths: Paths, card_id: i64, out: &Out) -> Result<()> {
+    let mut eng = Engine::open(paths)?;
+    let info = eng.card_info(card_id)?;
+    let (q, a, css) = eng.render_card(card_id)?;
+    eng.close()?;
+    let opts = ankh_render::Options {
+        stylesheet: Some(ankh_render::Stylesheet::parse(&css)),
+        reveal_hints: true,
+        ..Default::default()
+    };
+    let qt = ankh_render::render_html(&q, &opts).plain_text();
+    let at = ankh_render::render_html(&a, &opts).plain_text();
+    let date = |t: i64| {
+        chrono::DateTime::from_timestamp(t, 0)
+            .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
+            .unwrap_or_default()
+    };
+    let mut text = format!(
+        "card {}  note {}\ndeck       {}\nnotetype   {} · {}\npreset     {}\nadded      {}\ndue        {}\ninterval   {}d\nreviews    {} ({} lapses)\n",
+        info.card_id, info.note_id, info.deck, info.notetype, info.template, info.preset, date(info.added),
+        info.due_date.map(date).unwrap_or_else(|| "—".into()), info.interval_days, info.reviews, info.lapses
+    );
+    if let (Some(s), Some(d)) = (info.stability, info.difficulty) {
+        text.push_str(&format!("fsrs       stability {s:.1}d · difficulty {:.0}%\n", d * 10.0));
+    }
+    text.push_str(&format!("\n{qt}\n\n--- answer ---\n{at}\n"));
+    if !info.revlog.is_empty() {
+        text.push_str("\nrecent reviews\n");
+        for r in info.revlog.iter().take(10) {
+            let btn = ["", "again", "hard", "good", "easy"].get(r.button as usize).copied().unwrap_or("?");
+            text.push_str(&format!("  {}  {:<6} {:<9} {:.0}s\n", date(r.time), btn, r.kind, r.taken_secs));
+        }
+    }
+    let mut json = serde_json::to_value(&info).unwrap();
+    json["question_text"] = serde_json::Value::String(qt);
+    json["answer_text"] = serde_json::Value::String(at);
+    out.ok(text.trim_end(), json);
+    Ok(())
+}
+
+fn bulk(paths: Paths, query: &str, op: BulkOp, out: &Out) -> Result<()> {
+    let mut eng = Engine::open(paths)?;
+    let cids = eng.search(query, ankh_core::SortBy::SortField, false)?;
+    if cids.is_empty() {
+        out.ok("no cards match", serde_json::json!({ "matched": 0 }));
+        return Ok(());
+    }
+    let n = cids.len();
+    let msg = match op {
+        BulkOp::Suspend => format!("suspended {} cards", eng.suspend_cards(&cids)?),
+        BulkOp::Unsuspend => {
+            eng.unsuspend_cards(&cids)?;
+            format!("unsuspended {n} cards")
+        }
+        BulkOp::Bury => format!("buried {} cards", eng.bury_cards(&cids)?),
+        BulkOp::Flag(f) => {
+            if f > 7 {
+                return Err(anyhow::anyhow!("flag must be 0-7").into());
+            }
+            format!("flagged {} cards", eng.flag_cards(&cids, f)?)
+        }
+        BulkOp::Tag(t) => {
+            let nids = eng.note_ids_for_cards(&cids)?;
+            format!("tagged {} notes", eng.add_tags(&nids, &t)?)
+        }
+        BulkOp::Untag(t) => {
+            let nids = eng.note_ids_for_cards(&cids)?;
+            format!("untagged {} notes", eng.remove_tags(&nids, &t)?)
+        }
+        BulkOp::Move(d) => {
+            let id = eng.deck_id_by_name(&d, true)?.expect("created");
+            format!("moved {} cards to {d}", eng.move_cards(&cids, id)?)
+        }
+        BulkOp::Forget => {
+            eng.forget_cards(&cids)?;
+            format!("reset {n} cards to new")
+        }
+        BulkOp::Due(d) => {
+            eng.set_due(&cids, &d)?;
+            format!("set due date on {n} cards")
+        }
+        BulkOp::Delete { yes } => {
+            let nids = eng.note_ids_for_cards(&cids)?;
+            if !yes {
+                if !std::io::stdin().is_terminal() {
+                    return Err(anyhow::anyhow!("refusing to delete {} notes without --yes", nids.len()).into());
+                }
+                let ans = prompt(&format!("delete {} notes and all their cards? [y/N]", nids.len()))?;
+                if !ans.eq_ignore_ascii_case("y") {
+                    out.ok("cancelled", serde_json::json!({ "matched": n, "deleted": 0 }));
+                    return Ok(());
+                }
+            }
+            format!("deleted {} notes", eng.delete_notes(&nids)?)
+        }
+    };
+    eng.close()?;
+    out.ok(&msg, serde_json::json!({ "matched": n, "result": msg }));
     Ok(())
 }

@@ -6,6 +6,7 @@
 //! single-crate change.
 
 pub mod auth;
+pub mod browse;
 pub mod decks;
 pub mod engine;
 pub mod error;
@@ -14,6 +15,7 @@ pub mod review;
 pub mod sync;
 
 pub use auth::{AuthStore, Credentials};
+pub use browse::{BrowserRow, CardInfo, CardState, SortBy};
 pub use decks::{DeckId, DeckNode, DeckTree};
 pub use engine::Engine;
 pub use error::{Error, Result};

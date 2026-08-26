@@ -17,6 +17,7 @@ use super::audio::Player;
 use super::images::Images;
 use super::keys::{format_seq, Key, Keymap, Match};
 use super::theme::Theme;
+use super::views::browser::BrowserView;
 use super::views::decks::DecksView;
 use super::views::review::{ReviewView, Stage};
 use ankh_core::{Av, Rating};
@@ -58,18 +59,70 @@ pub enum Action {
     ScrollDown,
     ScrollUp,
     ToggleHints,
+    // browser
+    OpenBrowser,
+    BrowseDeck,
+    InsertMode,
+    VisualMode,
+    ClearSearch,
+    Preview,
+    FlipPreview,
+    CardInfo,
+    ToggleSuspend,
+    BulkBury,
+    BulkFlag(u8),
+    BulkMark,
+    PromptTag,
+    PromptUntag,
+    PromptMove,
+    PromptDue,
+    ConfirmDelete,
+    ConfirmForget,
+    CycleSort,
+    ReverseSort,
+    StudyCard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum View {
     Decks,
     Review,
+    Browser,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
     Normal,
     Command,
+    Insert,
+    Visual,
+    Prompt(PromptKind),
+}
+
+/// What a text prompt on the command line is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptKind {
+    AddTag,
+    RemoveTag,
+    MoveDeck,
+    SetDue,
+    ConfirmDelete(usize),
+    ConfirmForget(usize),
+}
+
+impl PromptKind {
+    fn label(&self) -> String {
+        match self {
+            PromptKind::AddTag => "add tags: ".into(),
+            PromptKind::RemoveTag => "remove tags: ".into(),
+            PromptKind::MoveDeck => "move to deck: ".into(),
+            PromptKind::SetDue => "due in days (0, 3, 1-7, 2!): ".into(),
+            PromptKind::ConfirmDelete(n) => {
+                format!("delete {n} note{} and all their cards? (y/N) ", if *n == 1 { "" } else { "s" })
+            }
+            PromptKind::ConfirmForget(n) => format!("reset {n} card{} to new? (y/N) ", if *n == 1 { "" } else { "s" }),
+        }
+    }
 }
 
 impl Mode {
@@ -77,6 +130,9 @@ impl Mode {
         match self {
             Mode::Normal => "NORMAL",
             Mode::Command => "COMMAND",
+            Mode::Insert => "INSERT",
+            Mode::Visual => "VISUAL",
+            Mode::Prompt(_) => "PROMPT",
         }
     }
 }
@@ -108,6 +164,7 @@ pub struct App {
     view: View,
     decks: DecksView,
     review: Option<ReviewView>,
+    browser: Option<BrowserView>,
     audio: Player,
     images: Images,
     keymaps: HashMap<View, Keymap<Action>>,
@@ -139,6 +196,7 @@ impl App {
             view: View::Decks,
             decks: DecksView::default(),
             review: None,
+            browser: None,
             audio: Player::new(),
             images,
             keymaps: default_keymaps(),
@@ -390,10 +448,169 @@ impl App {
             self.show_help = false;
             return;
         }
-        match self.mode {
+        match self.mode.clone() {
             Mode::Command => self.on_key_command(key),
-            Mode::Normal => self.on_key_normal(key),
+            Mode::Insert => self.on_key_insert(key),
+            Mode::Prompt(kind) => self.on_key_prompt(key, kind),
+            Mode::Normal | Mode::Visual => self.on_key_normal(key),
         }
+    }
+
+    fn on_key_insert(&mut self, key: Key) {
+        let Some(b) = self.browser.as_mut() else {
+            self.mode = Mode::Normal;
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Enter => {
+                b.run_search(&mut self.engine);
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Backspace => b.backspace(),
+            KeyCode::Left => b.cursor_left(),
+            KeyCode::Right => b.cursor_right(),
+            KeyCode::Char('w') if key.mods.contains(KeyModifiers::CONTROL) => b.delete_word(),
+            KeyCode::Char('u') if key.mods.contains(KeyModifiers::CONTROL) => b.clear_input(),
+            KeyCode::Char(c) if !key.mods.contains(KeyModifiers::CONTROL) => b.insert_char(c),
+            _ => {}
+        }
+    }
+
+    fn on_key_prompt(&mut self, key: Key, kind: PromptKind) {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                self.cmdline.clear();
+            }
+            KeyCode::Enter => {
+                let text = std::mem::take(&mut self.cmdline);
+                self.mode = Mode::Normal;
+                self.finish_prompt(kind, text.trim());
+            }
+            KeyCode::Backspace => {
+                self.cmdline.pop();
+            }
+            KeyCode::Char('u') if key.mods.contains(KeyModifiers::CONTROL) => self.cmdline.clear(),
+            KeyCode::Char(c) if !key.mods.contains(KeyModifiers::CONTROL) => {
+                // Confirmations take a single key.
+                if matches!(kind, PromptKind::ConfirmDelete(_) | PromptKind::ConfirmForget(_)) {
+                    self.mode = Mode::Normal;
+                    self.cmdline.clear();
+                    if c == 'y' || c == 'Y' {
+                        self.finish_prompt(kind, "y");
+                    } else {
+                        self.info("cancelled");
+                    }
+                } else {
+                    self.cmdline.push(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn finish_prompt(&mut self, kind: PromptKind, text: &str) {
+        let Some(b) = self.browser.as_ref() else { return };
+        let cids = b.targets();
+        if cids.is_empty() {
+            return;
+        }
+        let res: Result<String> = (|| {
+            Ok(match kind {
+                PromptKind::AddTag => {
+                    if text.is_empty() {
+                        return Ok("no tags given".into());
+                    }
+                    let nids = self.engine.note_ids_for_cards(&cids)?;
+                    let n = self.engine.add_tags(&nids, text)?;
+                    format!("tagged {n} note{}", plural(n))
+                }
+                PromptKind::RemoveTag => {
+                    if text.is_empty() {
+                        return Ok("no tags given".into());
+                    }
+                    let nids = self.engine.note_ids_for_cards(&cids)?;
+                    let n = self.engine.remove_tags(&nids, text)?;
+                    format!("untagged {n} note{}", plural(n))
+                }
+                PromptKind::MoveDeck => {
+                    if text.is_empty() {
+                        return Ok("no deck given".into());
+                    }
+                    let Some(id) = self.engine.deck_id_by_name(text, false)? else {
+                        return Err(anyhow::anyhow!("no deck named {text:?} (create it first)").into());
+                    };
+                    let n = self.engine.move_cards(&cids, id)?;
+                    format!("moved {n} card{} to {text}", plural(n))
+                }
+                PromptKind::SetDue => {
+                    if text.is_empty() {
+                        return Ok("no due date given".into());
+                    }
+                    self.engine.set_due(&cids, text)?;
+                    format!("set due date on {} card{}", cids.len(), plural(cids.len()))
+                }
+                PromptKind::ConfirmDelete(_) => {
+                    let nids = self.engine.note_ids_for_cards(&cids)?;
+                    let n = self.engine.delete_notes(&nids)?;
+                    format!("deleted {n} note{}", plural(n))
+                }
+                PromptKind::ConfirmForget(_) => {
+                    self.engine.forget_cards(&cids)?;
+                    format!("reset {} card{} to new", cids.len(), plural(cids.len()))
+                }
+            })
+        })();
+        match res {
+            Ok(msg) => {
+                self.info(msg);
+                self.after_bulk();
+            }
+            Err(e) => self.error(e.to_string()),
+        }
+    }
+
+    fn prompt(&mut self, kind: PromptKind) {
+        if self.view != View::Browser {
+            return;
+        }
+        self.cmdline.clear();
+        self.mode = Mode::Prompt(kind);
+    }
+
+    /// Refresh the browser (and leave visual mode) after a mutation.
+    fn after_bulk(&mut self) {
+        if self.mode == Mode::Visual {
+            self.mode = Mode::Normal;
+        }
+        if let Some(b) = self.browser.as_mut() {
+            b.anchor = None;
+            b.refresh(&mut self.engine);
+        }
+    }
+
+    fn bulk(&mut self, f: impl FnOnce(&mut Engine, &[i64]) -> Result<String>) {
+        let Some(b) = self.browser.as_ref() else { return };
+        let cids = b.targets();
+        if cids.is_empty() {
+            return;
+        }
+        match f(&mut self.engine, &cids) {
+            Ok(msg) => {
+                self.info(msg);
+                self.after_bulk();
+            }
+            Err(e) => self.error(e.to_string()),
+        }
+    }
+
+    fn open_browser(&mut self, query: String) {
+        let mut b = BrowserView::new(query);
+        b.run_search(&mut self.engine);
+        self.browser = Some(b);
+        self.view = View::Browser;
+        self.mode = Mode::Normal;
     }
 
     fn on_key_normal(&mut self, key: Key) {
@@ -412,6 +629,13 @@ impl App {
             self.pending.clear();
             self.count = None;
             self.pending_since = None;
+            return;
+        }
+        if key.code == KeyCode::Esc && self.mode == Mode::Visual {
+            self.mode = Mode::Normal;
+            if let Some(b) = self.browser.as_mut() {
+                b.anchor = None;
+            }
             return;
         }
         self.pending.push(key);
@@ -486,6 +710,35 @@ impl App {
                 self.audio.enabled = true;
                 self.info("audio on");
             }
+            ("browse" | "b" | "search", _) => {
+                let rest = cmd.split_once(' ').map(|x| x.1).unwrap_or("").to_string();
+                self.open_browser(rest);
+            }
+            ("sort", Some(col)) => match ankh_core::SortBy::parse(col) {
+                Some(sb) => {
+                    if let Some(b) = self.browser.as_mut() {
+                        b.sort = sb;
+                        b.refresh(&mut self.engine);
+                    }
+                }
+                None => self.error(format!("unknown sort column {col:?}")),
+            },
+            ("tag", Some(_)) => {
+                let rest = cmd.split_once(' ').map(|x| x.1).unwrap_or("").to_string();
+                self.finish_prompt(PromptKind::AddTag, &rest);
+            }
+            ("untag", Some(_)) => {
+                let rest = cmd.split_once(' ').map(|x| x.1).unwrap_or("").to_string();
+                self.finish_prompt(PromptKind::RemoveTag, &rest);
+            }
+            ("move", Some(_)) => {
+                let rest = cmd.split_once(' ').map(|x| x.1).unwrap_or("").to_string();
+                self.finish_prompt(PromptKind::MoveDeck, &rest);
+            }
+            ("due", Some(d)) => self.finish_prompt(PromptKind::SetDue, d),
+            ("delete", _) => self.dispatch(Action::ConfirmDelete),
+            ("forget", _) => self.dispatch(Action::ConfirmForget),
+            ("info", _) => self.dispatch(Action::CardInfo),
             _ => self.error(format!("not a command: {cmd}")),
         }
     }
@@ -495,6 +748,16 @@ impl App {
             Action::Quit => {
                 if self.view == View::Review {
                     self.leave_review();
+                    return;
+                }
+                if self.view == View::Browser {
+                    if self.browser.as_ref().map(|b| b.info.is_some()).unwrap_or(false) {
+                        self.browser.as_mut().unwrap().info = None;
+                        return;
+                    }
+                    self.view = View::Decks;
+                    self.mode = Mode::Normal;
+                    self.refresh();
                     return;
                 }
                 if self.creds.is_some() && self.sync.is_none() {
@@ -509,16 +772,31 @@ impl App {
             Action::Down => match self.view {
                 View::Decks => self.decks.move_by(1),
                 View::Review => self.dispatch(Action::ScrollDown),
+                View::Browser => {
+                    if let Some(b) = self.browser.as_mut() {
+                        b.move_by(1);
+                    }
+                }
             },
             Action::Up => match self.view {
                 View::Decks => self.decks.move_by(-1),
                 View::Review => self.dispatch(Action::ScrollUp),
+                View::Browser => {
+                    if let Some(b) = self.browser.as_mut() {
+                        b.move_by(-1);
+                    }
+                }
             },
             Action::Top => match self.view {
                 View::Decks => self.decks.go_top(),
                 View::Review => {
                     if let Some(r) = self.review.as_mut() {
                         r.scroll = 0;
+                    }
+                }
+                View::Browser => {
+                    if let Some(b) = self.browser.as_mut() {
+                        b.selected = 0;
                     }
                 }
             },
@@ -529,9 +807,28 @@ impl App {
                         r.scroll = u16::MAX / 2;
                     }
                 }
+                View::Browser => {
+                    if let Some(b) = self.browser.as_mut() {
+                        b.selected = b.ids.len().saturating_sub(1);
+                    }
+                }
             },
-            Action::HalfDown => self.decks.move_by(10),
-            Action::HalfUp => self.decks.move_by(-10),
+            Action::HalfDown => match self.view {
+                View::Browser => {
+                    if let Some(b) = self.browser.as_mut() {
+                        b.move_by(15);
+                    }
+                }
+                _ => self.decks.move_by(10),
+            },
+            Action::HalfUp => match self.view {
+                View::Browser => {
+                    if let Some(b) = self.browser.as_mut() {
+                        b.move_by(-15);
+                    }
+                }
+                _ => self.decks.move_by(-10),
+            },
             Action::Expand => self.decks.expand(),
             Action::Collapse => self.decks.collapse(),
             Action::ToggleFold => self.decks.toggle_fold(),
@@ -618,11 +915,15 @@ impl App {
                 }
                 Err(e) => self.error(e.to_string()),
             },
-            Action::Back => {
-                if self.view == View::Review {
-                    self.leave_review();
+            Action::Back => match self.view {
+                View::Review => self.leave_review(),
+                View::Browser => {
+                    self.view = View::Decks;
+                    self.mode = Mode::Normal;
+                    self.refresh();
                 }
-            }
+                View::Decks => {}
+            },
             Action::ScrollDown => {
                 if let Some(r) = self.review.as_mut() {
                     r.scroll_by(1);
@@ -638,6 +939,158 @@ impl App {
                     r.reveal_hints = !r.reveal_hints;
                     r.rerender();
                 }
+            }
+            Action::OpenBrowser => {
+                let q = self.browser.as_ref().map(|b| b.query.clone()).unwrap_or_default();
+                self.open_browser(q);
+            }
+            Action::BrowseDeck => {
+                let q = match self.view {
+                    View::Decks => {
+                        self.decks.selected_deck().map(|d| format!("deck:\"{}\"", d.full_name)).unwrap_or_default()
+                    }
+                    View::Review => {
+                        self.review.as_ref().map(|r| format!("deck:\"{}\"", r.deck_name)).unwrap_or_default()
+                    }
+                    View::Browser => String::new(),
+                };
+                self.open_browser(q);
+            }
+            Action::InsertMode => {
+                if self.view == View::Browser {
+                    self.mode = Mode::Insert;
+                }
+            }
+            Action::VisualMode => {
+                if let Some(b) = self.browser.as_mut() {
+                    if self.mode == Mode::Visual {
+                        self.mode = Mode::Normal;
+                        b.anchor = None;
+                    } else {
+                        self.mode = Mode::Visual;
+                        b.anchor = Some(b.selected);
+                    }
+                }
+            }
+            Action::ClearSearch => {
+                if let Some(b) = self.browser.as_mut() {
+                    b.clear_input();
+                    self.mode = Mode::Insert;
+                }
+            }
+            Action::Preview => {
+                if let Some(b) = self.browser.as_mut() {
+                    b.preview = !b.preview;
+                }
+            }
+            Action::FlipPreview => {
+                if let Some(b) = self.browser.as_mut() {
+                    b.preview_answer = !b.preview_answer;
+                }
+            }
+            Action::CardInfo => {
+                let id = match self.view {
+                    View::Browser => self.browser.as_ref().and_then(|b| b.current_id()),
+                    View::Review => self.review.as_ref().and_then(|r| r.card.as_ref().map(|c| c.card_id)),
+                    View::Decks => None,
+                };
+                let Some(id) = id else { return };
+                if let Some(b) = self.browser.as_mut() {
+                    if b.info.is_some() {
+                        b.info = None;
+                        return;
+                    }
+                }
+                match self.engine.card_info(id) {
+                    Ok(info) => {
+                        if let Some(b) = self.browser.as_mut() {
+                            b.info = Some(info);
+                        } else {
+                            self.info(format!(
+                                "{} · {}d interval · {} reviews · {} lapses{}",
+                                info.deck,
+                                info.interval_days,
+                                info.reviews,
+                                info.lapses,
+                                info.stability.map(|s| format!(" · stability {s:.0}d")).unwrap_or_default()
+                            ));
+                        }
+                    }
+                    Err(e) => self.error(e.to_string()),
+                }
+            }
+            Action::ToggleSuspend => self.bulk(|eng, cids| {
+                let rows = eng.browser_rows(cids)?;
+                let all_suspended = !rows.is_empty() && rows.iter().all(|r| r.state == ankh_core::CardState::Suspended);
+                if all_suspended {
+                    eng.unsuspend_cards(cids)?;
+                    Ok(format!("unsuspended {} card{}", cids.len(), plural(cids.len())))
+                } else {
+                    let n = eng.suspend_cards(cids)?;
+                    Ok(format!("suspended {n} card{}", plural(n)))
+                }
+            }),
+            Action::BulkBury => self.bulk(|eng, cids| {
+                let n = eng.bury_cards(cids)?;
+                Ok(format!("buried {n} card{}", plural(n)))
+            }),
+            Action::BulkFlag(n) => self.bulk(move |eng, cids| {
+                eng.flag_cards(cids, n)?;
+                Ok(if n == 0 {
+                    "flag cleared".to_string()
+                } else {
+                    format!("flagged {} card{}", cids.len(), plural(cids.len()))
+                })
+            }),
+            Action::BulkMark => self.bulk(|eng, cids| {
+                let nids = eng.note_ids_for_cards(cids)?;
+                let rows = eng.browser_rows(cids)?;
+                if rows.iter().all(|r| r.marked) {
+                    eng.remove_tags(&nids, "marked")?;
+                    Ok("unmarked".into())
+                } else {
+                    eng.add_tags(&nids, "marked")?;
+                    Ok("marked".into())
+                }
+            }),
+            Action::PromptTag => self.prompt(PromptKind::AddTag),
+            Action::PromptUntag => self.prompt(PromptKind::RemoveTag),
+            Action::PromptMove => self.prompt(PromptKind::MoveDeck),
+            Action::PromptDue => self.prompt(PromptKind::SetDue),
+            Action::ConfirmDelete => {
+                let n = self.browser.as_ref().map(|b| b.targets().len()).unwrap_or(0);
+                if n > 0 {
+                    self.prompt(PromptKind::ConfirmDelete(n));
+                }
+            }
+            Action::ConfirmForget => {
+                let n = self.browser.as_ref().map(|b| b.targets().len()).unwrap_or(0);
+                if n > 0 {
+                    self.prompt(PromptKind::ConfirmForget(n));
+                }
+            }
+            Action::CycleSort => {
+                if let Some(b) = self.browser.as_mut() {
+                    b.cycle_sort(&mut self.engine);
+                }
+            }
+            Action::ReverseSort => {
+                if let Some(b) = self.browser.as_mut() {
+                    b.toggle_reverse(&mut self.engine);
+                }
+            }
+            Action::StudyCard => {
+                // Open the current row's deck in review.
+                let Some(row) = self.browser.as_ref().and_then(|b| b.current().cloned()) else { return };
+                if let Err(e) = self.engine.select_deck(row.deck_id) {
+                    self.error(e.to_string());
+                    return;
+                }
+                let mut rv = ReviewView::new(row.deck, self.engine.paths().media_folder());
+                rv.session_started = Instant::now();
+                self.review = Some(rv);
+                self.view = View::Review;
+                self.advance();
             }
             Action::Sync => self.start_sync(SyncOp::Normal, false),
             Action::SyncDownload => self.start_sync(SyncOp::FullDownload, false),
@@ -668,6 +1121,11 @@ impl App {
             View::Review => {
                 if let Some(r) = self.review.as_mut() {
                     r.draw(f, chunks[0], &theme, &mut self.images);
+                }
+            }
+            View::Browser => {
+                if let Some(b) = self.browser.as_mut() {
+                    b.draw(f, chunks[0], &theme, &mut self.engine, self.mode == Mode::Insert);
                 }
             }
         }
@@ -722,6 +1180,9 @@ impl App {
     fn draw_cmdline(&self, f: &mut Frame, area: Rect, theme: &Theme) {
         let line = match (&self.mode, &self.message) {
             (Mode::Command, _) => Line::from(vec![Span::styled(":", theme.accent()), Span::raw(self.cmdline.clone())]),
+            (Mode::Prompt(k), _) => {
+                Line::from(vec![Span::styled(k.label(), theme.accent()), Span::raw(self.cmdline.clone())])
+            }
             (_, Some((Message::Error(m), _))) => {
                 Line::from(Span::styled(format!(" {m}"), Style::default().fg(theme.error)))
             }
@@ -729,8 +1190,13 @@ impl App {
             _ => Line::default(),
         };
         f.render_widget(Paragraph::new(line), area);
-        if self.mode == Mode::Command {
-            f.set_cursor_position((area.x + 1 + self.cmdline.chars().count() as u16, area.y));
+        match &self.mode {
+            Mode::Command => f.set_cursor_position((area.x + 1 + self.cmdline.chars().count() as u16, area.y)),
+            Mode::Prompt(k) => f.set_cursor_position((
+                area.x + (k.label().chars().count() + self.cmdline.chars().count()) as u16,
+                area.y,
+            )),
+            _ => {}
         }
     }
 
@@ -813,6 +1279,10 @@ impl App {
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(" :sync [download|upload]  :refresh  :undo  :q  :q!", theme.muted())));
         lines.push(Line::from(Span::styled(" :flag N  :bury  :suspend  :unbury  :audio on|off", theme.muted())));
+        lines.push(Line::from(Span::styled(
+            " :browse QUERY  :sort COL  :tag T  :untag T  :move DECK  :due N",
+            theme.muted(),
+        )));
         let rect = centered(area, 52, lines.len() as u16 + 2);
         let block = Block::default()
             .borders(Borders::ALL)
@@ -885,6 +1355,8 @@ fn default_keymaps() -> HashMap<View, Keymap<Action>> {
 
     let mut decks = global.clone();
     decks
+        .bind("/", Action::BrowseDeck, "browse this deck")
+        .bind("b", Action::OpenBrowser, "browser")
         .bind("<C-d>", Action::HalfDown, "half page down")
         .bind("<C-u>", Action::HalfUp, "half page up")
         .bind("l", Action::Expand, "expand")
@@ -911,6 +1383,8 @@ fn default_keymaps() -> HashMap<View, Keymap<Action>> {
         .bind("*", Action::ToggleMark, "mark / unmark note")
         .bind("r", Action::Replay, "replay audio")
         .bind("H", Action::ToggleHints, "reveal / hide hints")
+        .bind("i", Action::CardInfo, "card info")
+        .bind("/", Action::BrowseDeck, "browse this deck")
         .bind("U", Action::Unbury, "unbury deck")
         .bind("<BS>", Action::Back, "back to decks")
         .bind("<C-d>", Action::ScrollDown, "scroll down")
@@ -926,7 +1400,49 @@ fn default_keymaps() -> HashMap<View, Keymap<Action>> {
     // `gg` conflicts with `g` (good); in review `g` wins and top/bottom use G only.
     review.unbind(&super::keys::parse_seq("gg").unwrap());
 
-    HashMap::from([(View::Decks, decks), (View::Review, review)])
+    let mut browser = global.clone();
+    browser
+        .bind("/", Action::InsertMode, "edit search")
+        .bind("i", Action::InsertMode, "edit search")
+        .bind("<C-l>", Action::ClearSearch, "new search")
+        .bind("v", Action::VisualMode, "visual select")
+        .bind("V", Action::VisualMode, "visual select")
+        .bind("<C-d>", Action::HalfDown, "half page down")
+        .bind("<C-u>", Action::HalfUp, "half page up")
+        .bind("p", Action::Preview, "toggle preview")
+        .bind("<Tab>", Action::FlipPreview, "preview question / answer")
+        .bind("<CR>", Action::StudyCard, "study this card's deck")
+        .bind("I", Action::CardInfo, "card info")
+        .bind("!", Action::ToggleSuspend, "suspend / unsuspend")
+        .bind("-", Action::BulkBury, "bury")
+        .bind("*", Action::BulkMark, "mark / unmark")
+        .bind("t", Action::PromptTag, "add tags")
+        .bind("T", Action::PromptUntag, "remove tags")
+        .bind("m", Action::PromptMove, "move to deck")
+        .bind("d", Action::PromptDue, "set due date")
+        .bind("D", Action::ConfirmDelete, "delete notes")
+        .bind("F", Action::ConfirmForget, "forget (reset to new)")
+        .bind("o", Action::CycleSort, "next sort column")
+        .bind("O", Action::ReverseSort, "reverse sort")
+        .bind("<BS>", Action::Back, "back to decks")
+        .bind("<leader>0", Action::BulkFlag(0), "clear flag")
+        .bind("<leader>1", Action::BulkFlag(1), "flag red")
+        .bind("<leader>2", Action::BulkFlag(2), "flag orange")
+        .bind("<leader>3", Action::BulkFlag(3), "flag green")
+        .bind("<leader>4", Action::BulkFlag(4), "flag blue")
+        .bind("<leader>5", Action::BulkFlag(5), "flag pink")
+        .bind("<leader>6", Action::BulkFlag(6), "flag turquoise")
+        .bind("<leader>7", Action::BulkFlag(7), "flag purple");
+
+    HashMap::from([(View::Decks, decks), (View::Review, review), (View::Browser, browser)])
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 fn centered(area: Rect, w: u16, h: u16) -> Rect {

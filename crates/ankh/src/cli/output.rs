@@ -13,6 +13,10 @@ impl Out {
         Self { format }
     }
 
+    pub fn format(&self) -> Format {
+        self.format
+    }
+
     fn envelope(&self, data: Value) -> Value {
         match data {
             Value::Object(mut m) => {

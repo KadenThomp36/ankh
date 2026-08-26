@@ -25,7 +25,7 @@ Early. Milestones, in order:
 - [x] **1 · skeleton** — CLI (`login`, `sync`, `decks`, `status`, `--format json`), TUI deck tree, keymaps, which-key, sync overlay
 - [x] **2 · review** — the study screen: question/answer, four ratings with FSRS intervals, undo, bury/suspend/flag/mark, audio autoplay (mpv), `ankh next` / `ankh answer`
 - [x] **3 · rendering** — notetype CSS (classes, alignment, size→weight), Unicode/CJK wrapping, `<ruby>`, inline images (Kitty/Sixel/iTerm2/half-blocks), hints (`H`), type-answer and MathJax placeholders, theme-safe colours
-- [ ] **4 · browser** — Anki search syntax, previews, bulk ops
+- [x] **4 · browser** — Anki search syntax, sortable table, question/answer preview, card info + review log, visual-mode bulk ops (suspend/bury/flag/mark/tag/move/due/forget/delete), `ankh search` / `ankh card` / `ankh bulk`
 - [ ] **5 · editor** — notes as Markdown in `$EDITOR`, batch add, git-able deck export
 - [ ] **6 · Lua** — `init.lua`, keymaps, events, plugins
 - [ ] **7 · management** — deck options/FSRS, stats, import/export
@@ -55,7 +55,17 @@ view's keymap, `q` goes back / syncs and quits.
 
 Reviewing: `Space` shows the answer and then rates *good*; `1`–`4` (or
 `a`/`h`/`g`/`e`) rate; `u` undo; `-` bury; `!` suspend; `*` mark; `r` replay
-audio; `<Space>1`…`7` flag.
+audio; `H` reveal hints; `i` card info; `<Space>1`…`7` flag.
+
+Browsing (`/` on a deck, or `b`): `/` edits the search (Anki syntax), `Tab`
+flips the preview, `I` card info, `v` starts a visual range, then `!` `-` `*`
+`t` `T` `m` `d` `D` `F` act on it, `o`/`O` change the sort.
+
+```sh
+ankh search 'deck:Korean is:due' --sort due --format jsonl | jq .sort_field
+ankh card 1633756077720
+ankh bulk 'tag:leech prop:lapses>10' --suspend
+```
 
 ## Design
 
