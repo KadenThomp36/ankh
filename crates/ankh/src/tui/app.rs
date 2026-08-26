@@ -14,6 +14,7 @@ use ratatui::{DefaultTerminal, Frame};
 use std::collections::HashMap;
 
 use super::audio::Player;
+use super::images::Images;
 use super::keys::{format_seq, Key, Keymap, Match};
 use super::theme::Theme;
 use super::views::decks::DecksView;
@@ -56,6 +57,7 @@ pub enum Action {
     Back,
     ScrollDown,
     ScrollUp,
+    ToggleHints,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -107,6 +109,7 @@ pub struct App {
     decks: DecksView,
     review: Option<ReviewView>,
     audio: Player,
+    images: Images,
     keymaps: HashMap<View, Keymap<Action>>,
     pending: Vec<Key>,
     count: Option<usize>,
@@ -124,7 +127,7 @@ pub struct App {
 const TIMEOUTLEN: Duration = Duration::from_millis(1000);
 
 impl App {
-    pub fn new(paths: Paths) -> Result<Self> {
+    pub fn new(paths: Paths, images: Images) -> Result<Self> {
         let store = AuthStore::new(&paths.profile);
         let creds = store.load()?;
         let engine = Engine::open(paths)?;
@@ -137,6 +140,7 @@ impl App {
             decks: DecksView::default(),
             review: None,
             audio: Player::new(),
+            images,
             keymaps: default_keymaps(),
             pending: Vec::new(),
             count: None,
@@ -154,6 +158,7 @@ impl App {
         if !app.audio.available() {
             app.info("no audio player found — install mpv for card audio");
         }
+        tracing::info!(images = app.images.protocol_name(), "image protocol");
         Ok(app)
     }
 
@@ -275,7 +280,7 @@ impl App {
             self.error(e.to_string());
             return;
         }
-        let mut rv = ReviewView::new(name);
+        let mut rv = ReviewView::new(name, self.engine.paths().media_folder());
         rv.session_started = Instant::now();
         self.review = Some(rv);
         self.view = View::Review;
@@ -628,6 +633,12 @@ impl App {
                     r.scroll_by(-1);
                 }
             }
+            Action::ToggleHints => {
+                if let Some(r) = self.review.as_mut() {
+                    r.reveal_hints = !r.reveal_hints;
+                    r.rerender();
+                }
+            }
             Action::Sync => self.start_sync(SyncOp::Normal, false),
             Action::SyncDownload => self.start_sync(SyncOp::FullDownload, false),
             Action::SyncUpload => self.start_sync(SyncOp::FullUpload, false),
@@ -656,7 +667,7 @@ impl App {
             View::Decks => self.decks.draw(f, chunks[0], &theme, self.prompt.is_none()),
             View::Review => {
                 if let Some(r) = self.review.as_mut() {
-                    r.draw(f, chunks[0], &theme);
+                    r.draw(f, chunks[0], &theme, &mut self.images);
                 }
             }
         }
@@ -899,6 +910,7 @@ fn default_keymaps() -> HashMap<View, Keymap<Action>> {
         .bind("!", Action::Suspend, "suspend card")
         .bind("*", Action::ToggleMark, "mark / unmark note")
         .bind("r", Action::Replay, "replay audio")
+        .bind("H", Action::ToggleHints, "reveal / hide hints")
         .bind("U", Action::Unbury, "unbury deck")
         .bind("<BS>", Action::Back, "back to decks")
         .bind("<C-d>", Action::ScrollDown, "scroll down")

@@ -79,7 +79,11 @@ fn next(paths: Paths, deck: Option<String>, out: &Out) -> Result<()> {
     match card {
         None => out.ok("nothing due", serde_json::json!({ "card": null })),
         Some(c) => {
-            let opts = ankh_render::Options::default();
+            let opts = ankh_render::Options {
+                stylesheet: Some(ankh_render::Stylesheet::parse(&c.css)),
+                reveal_hints: true,
+                ..Default::default()
+            };
             let q = ankh_render::render_html(&c.question_html, &opts).plain_text();
             let a = ankh_render::render_html(&c.answer_html, &opts).plain_text();
             let text = format!(

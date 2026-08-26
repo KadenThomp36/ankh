@@ -18,6 +18,7 @@ mod html;
 mod wrap;
 
 pub use color::Color;
+pub use css::Stylesheet;
 pub use html::{render_html, Options};
 pub use wrap::{wrap_document, Line, LineKind};
 

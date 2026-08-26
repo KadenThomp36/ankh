@@ -4,6 +4,7 @@ pub mod app;
 pub mod audio;
 pub mod banner;
 pub mod doc;
+pub mod images;
 pub mod keys;
 pub mod theme;
 pub mod views;
@@ -11,7 +12,9 @@ pub mod views;
 use ankh_core::Paths;
 
 pub fn run(paths: Paths) -> i32 {
-    match app::App::new(paths) {
+    // Query the terminal for graphics support before entering the alternate screen.
+    let images = images::Images::detect();
+    match app::App::new(paths, images) {
         Ok(app) => {
             let terminal = ratatui::init();
             let res = app.run(terminal);

@@ -7,6 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 #[allow(dead_code)] // fields used by later views
 pub struct Theme {
     pub name: &'static str,
+    pub dark: bool,
     pub bg: Color,
     pub bg_alt: Color,
     pub fg: Color,
@@ -28,6 +29,7 @@ impl Theme {
     pub fn tokyonight() -> Self {
         Theme {
             name: "tokyonight",
+            dark: true,
             bg: Color::Rgb(0x1a, 0x1b, 0x26),
             bg_alt: Color::Rgb(0x24, 0x28, 0x3b),
             fg: Color::Rgb(0xc0, 0xca, 0xf5),

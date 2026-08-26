@@ -26,3 +26,6 @@ ratatui = "0.30"
 rpassword = "7"
 figlet-rs = "0.1"
 comfy-table = "7"
+libc = "0.2"
+ratatui-image = { version = "11", default-features = false, features = ["crossterm"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }

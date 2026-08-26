@@ -1,10 +1,11 @@
 //! The study screen. This is where the design budget goes.
 
+use std::path::PathBuf;
 use std::time::Instant;
 
 use ankh_core::{Congrats, QueueKind, Rating, ReviewCard};
-use ankh_render::{render_html, wrap_document, Align, Document, Options};
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ankh_render::{render_html, wrap_document, Align, Document, Options, Stylesheet};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
@@ -12,6 +13,7 @@ use ratatui::Frame;
 
 use crate::tui::banner;
 use crate::tui::doc;
+use crate::tui::images::Images;
 use crate::tui::theme::{CountKind, Theme};
 
 pub enum Stage {
@@ -32,10 +34,13 @@ pub struct ReviewView {
     wrapped: Option<(usize, Vec<ankh_render::Line>)>,
     pub reviewed: u32,
     pub session_started: Instant,
+    pub reveal_hints: bool,
+    media_dir: PathBuf,
+    opts: Options,
 }
 
 impl ReviewView {
-    pub fn new(deck_name: String) -> Self {
+    pub fn new(deck_name: String, media_dir: PathBuf) -> Self {
         ReviewView {
             deck_name,
             card: None,
@@ -46,16 +51,34 @@ impl ReviewView {
             wrapped: None,
             reviewed: 0,
             session_started: Instant::now(),
+            reveal_hints: false,
+            media_dir,
+            opts: Options { default_align: Align::Center, ..Default::default() },
         }
     }
 
     fn set_doc(&mut self, html: &str) {
-        self.doc = render_html(html, &Options { default_align: Align::Center });
+        self.opts.reveal_hints = self.reveal_hints;
+        self.doc = render_html(html, &self.opts);
         self.wrapped = None;
         self.scroll = 0;
     }
 
+    /// Re-render the current side (after toggling hints).
+    pub fn rerender(&mut self) {
+        let Some(c) = &self.card else { return };
+        let html = match self.stage {
+            Stage::Answer => c.answer_html.clone(),
+            _ => c.question_html.clone(),
+        };
+        let scroll = self.scroll;
+        self.set_doc(&html);
+        self.scroll = scroll;
+    }
+
     pub fn show_card(&mut self, card: ReviewCard) {
+        self.reveal_hints = false;
+        self.opts.stylesheet = if card.css.trim().is_empty() { None } else { Some(Stylesheet::parse(&card.css)) };
         self.set_doc(&card.question_html);
         self.card = Some(card);
         self.stage = Stage::Question;
@@ -95,7 +118,7 @@ impl ReviewView {
         &self.wrapped.as_ref().unwrap().1
     }
 
-    pub fn draw(&mut self, f: &mut Frame, area: Rect, theme: &Theme) {
+    pub fn draw(&mut self, f: &mut Frame, area: Rect, theme: &Theme, images: &mut Images) {
         let title = Line::from(vec![Span::styled(format!(" {} ", self.deck_name), theme.title())]);
         let counts = self.card.as_ref().map(|c| c.counts).unwrap_or_default();
         let kind = self.card.as_ref().map(|c| c.kind);
@@ -147,7 +170,11 @@ impl ReviewView {
                 };
                 let width = text_area.width as usize;
                 let lines = self.lines(width).clone();
-                let rendered = doc::to_lines(&lines, width, theme);
+                let media_dir = self.media_dir.clone();
+                let max_img = Size::new(text_area.width, (text_area.height * 3 / 5).max(4));
+                let (rendered, slots) = doc::to_lines(&lines, width, theme, |src| {
+                    images.size_for(&media_dir.join(src), max_img).map(|s| (s.width, s.height))
+                });
                 let total = rendered.len() as u16;
                 let max_scroll = total.saturating_sub(text_area.height);
                 if self.scroll > max_scroll {
@@ -157,6 +184,16 @@ impl ReviewView {
                 let pad = if total < text_area.height { (text_area.height - total) / 3 } else { 0 };
                 let area = Rect { y: text_area.y + pad, height: text_area.height - pad, ..text_area };
                 f.render_widget(Paragraph::new(rendered).scroll((self.scroll, 0)), area);
+                for slot in slots {
+                    let top = slot.row as i32 - self.scroll as i32;
+                    if top < 0 || top as u16 + slot.height > area.height {
+                        continue; // partially visible images are skipped rather than torn
+                    }
+                    let x = area.x + area.width.saturating_sub(slot.width) / 2;
+                    let rect =
+                        Rect { x, y: area.y + top as u16, width: slot.width.min(area.width), height: slot.height };
+                    images.draw(f, &media_dir.join(&slot.src), rect);
+                }
                 if max_scroll > 0 {
                     let pct = (self.scroll as f32 / max_scroll as f32 * 100.0) as u16;
                     let s = format!("{pct}%");

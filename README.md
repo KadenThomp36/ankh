@@ -24,7 +24,7 @@ Early. Milestones, in order:
 - [x] **0 · spike** — rslib as a dependency; login, full sync, media, scheduler
 - [x] **1 · skeleton** — CLI (`login`, `sync`, `decks`, `status`, `--format json`), TUI deck tree, keymaps, which-key, sync overlay
 - [x] **2 · review** — the study screen: question/answer, four ratings with FSRS intervals, undo, bury/suspend/flag/mark, audio autoplay (mpv), `ankh next` / `ankh answer`
-- [ ] **3 · rendering** — Unicode/CJK, `<ruby>`, images (Kitty/sixel), audio
+- [x] **3 · rendering** — notetype CSS (classes, alignment, size→weight), Unicode/CJK wrapping, `<ruby>`, inline images (Kitty/Sixel/iTerm2/half-blocks), hints (`H`), type-answer and MathJax placeholders, theme-safe colours
 - [ ] **4 · browser** — Anki search syntax, previews, bulk ops
 - [ ] **5 · editor** — notes as Markdown in `$EDITOR`, batch add, git-able deck export
 - [ ] **6 · Lua** — `init.lua`, keymaps, events, plugins

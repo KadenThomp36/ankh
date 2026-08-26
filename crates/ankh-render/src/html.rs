@@ -4,26 +4,48 @@ use ego_tree::NodeRef;
 use scraper::{Html, Node};
 
 use crate::color::Color;
-use crate::css::{parse_inline, Decl};
+use crate::css::{parse_inline, Decl, Stylesheet};
 use crate::{Align, Block, Document, Span, Style};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Default)]
 pub struct Options {
-    /// Alignment for blocks that don't set their own (Anki's `.card` is
-    /// usually centered).
+    /// Alignment for blocks that don't set their own. The stylesheet's
+    /// `.card { text-align }` overrides this when present.
     pub default_align: Align,
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Options { default_align: Align::Left }
-    }
+    /// The notetype's CSS.
+    pub stylesheet: Option<Stylesheet>,
+    /// Show the contents of `{{hint:Field}}` blocks instead of the link.
+    pub reveal_hints: bool,
 }
 
 pub fn render_html(html: &str, opts: &Options) -> Document {
     let frag = Html::parse_fragment(html);
-    let mut b = Builder { blocks: vec![], spans: vec![], align: Align::Inherit, indent: 0, prefix: None, opts: *opts };
-    b.walk_children(frag.tree.root(), Style::default(), Align::Inherit, 0);
+    let mut root_align = opts.default_align;
+    let mut root_style = Style::default();
+    if let Some(sheet) = &opts.stylesheet {
+        for d in sheet.card() {
+            if d.align != Align::Inherit {
+                root_align = d.align;
+            }
+            // `.card` colours are designed for Anki's white/black page, not the
+            // user's terminal theme, so only emphasis is inherited from it.
+            let mut d2 = *d;
+            d2.style.fg = None;
+            d2.style.bg = None;
+            root_style = merge(root_style, &d2);
+        }
+    }
+    let mut b = Builder {
+        blocks: vec![],
+        spans: vec![],
+        align: Align::Inherit,
+        indent: 0,
+        prefix: None,
+        default_align: root_align,
+        sheet: opts.stylesheet.clone().unwrap_or_default(),
+        reveal_hints: opts.reveal_hints,
+    };
+    b.walk_children(frag.tree.root(), root_style, Align::Inherit, 0);
     b.flush();
     b.trim_blanks();
     Document { blocks: b.blocks }
@@ -36,7 +58,9 @@ struct Builder {
     indent: u16,
     /// Text to put at the start of the next paragraph (list bullets, quote bars).
     prefix: Option<String>,
-    opts: Options,
+    default_align: Align,
+    sheet: Stylesheet,
+    reveal_hints: bool,
 }
 
 const BLOCK_TAGS: &[&str] = &[
@@ -156,6 +180,31 @@ impl Builder {
         self.spans.push(Span { text: out, style, ruby: None });
     }
 
+    /// Text with a couple of Anki-isms: `[[type:Field]]` placeholders and
+    /// MathJax `\( … \)` / `\[ … \]` delimiters.
+    fn push_text_special(&mut self, text: &str, style: Style) {
+        if let Some(i) = text.find("[[type:") {
+            if let Some(j) = text[i..].find("]]") {
+                self.push_text_special(&text[..i], style);
+                self.push_text("[type the answer]", Style { dim: true, italic: true, ..style }, false);
+                self.push_text_special(&text[i + j + 2..], style);
+                return;
+            }
+        }
+        for (open, close) in [("\\(", "\\)"), ("\\[", "\\]")] {
+            if let Some(i) = text.find(open) {
+                if let Some(j) = text[i + 2..].find(close) {
+                    self.push_text_special(&text[..i], style);
+                    let math = text[i + 2..i + 2 + j].trim();
+                    self.push_text(math, Style { code: true, ..style }, false);
+                    self.push_text_special(&text[i + 2 + j + 2..], style);
+                    return;
+                }
+            }
+        }
+        self.push_text(text, style, false);
+    }
+
     fn flush_para(&mut self) {
         // Trim trailing whitespace.
         while let Some(last) = self.spans.last_mut() {
@@ -169,7 +218,7 @@ impl Builder {
         }
         if !self.spans.is_empty() {
             let spans = std::mem::take(&mut self.spans);
-            let align = if self.align == Align::Inherit { self.opts.default_align } else { self.align };
+            let align = if self.align == Align::Inherit { self.default_align } else { self.align };
             self.blocks.push(Block::Para { spans, align, indent: self.indent });
         }
     }
@@ -199,18 +248,40 @@ impl Builder {
 
     fn walk(&mut self, node: NodeRef<'_, Node>, style: Style, align: Align, indent: u16) {
         match node.value() {
-            Node::Text(t) => self.push_text(t, style, false),
+            Node::Text(t) => self.push_text_special(t, style),
             Node::Element(el) => {
                 let tag = el.name().to_ascii_lowercase();
                 if SKIP_TAGS.contains(&tag.as_str()) {
                     return;
                 }
+                let classes: Vec<String> = el.classes().map(|c| c.to_ascii_lowercase()).collect();
+                let is_hint = classes.iter().any(|c| c == "hint");
+                // {{hint:Field}} renders a link plus a hidden div; show one or the other.
+                if is_hint && tag == "a" && self.reveal_hints {
+                    return;
+                }
+                let mut style = style;
+                let mut align = align;
+                let mut hidden = false;
+                for d in self.sheet.matching(&tag, &classes, el.attr("id")) {
+                    style = merge(style, d);
+                    if d.align != Align::Inherit {
+                        align = d.align;
+                    }
+                    hidden |= d.hidden;
+                }
                 let decl = el.attr("style").map(parse_inline).unwrap_or_default();
-                if decl.hidden || el.has_class("hidden", scraper::CaseSensitivity::AsciiCaseInsensitive) {
+                hidden |= decl.hidden;
+                if is_hint && tag == "div" && self.reveal_hints {
+                    hidden = false;
+                }
+                if hidden || classes.iter().any(|c| c == "hidden") {
                     return;
                 }
                 let mut style = merge(style, &decl);
-                let mut align = if decl.align != Align::Inherit { decl.align } else { align };
+                if decl.align != Align::Inherit {
+                    align = decl.align;
+                }
                 match tag.as_str() {
                     "br" => {
                         if self.spans.is_empty() {
@@ -381,6 +452,7 @@ impl Builder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::css::Stylesheet;
 
     fn para(doc: &Document, i: usize) -> &Vec<Span> {
         match &doc.blocks[i] {
@@ -429,6 +501,34 @@ mod tests {
         assert_eq!(p[1].text, "です");
         assert_eq!(doc.blocks[1], Block::Image { src: "x.png".into(), alt: String::new() });
         assert!(!doc.plain_text().contains("secret"));
+    }
+
+    #[test]
+    fn stylesheet_classes_apply_and_card_colours_are_ignored() {
+        let css = ".card { text-align: center; color: black; } .eng.title { color: #999999; font-size: 80%; } .center { text-align:center }";
+        let opts = Options { stylesheet: Some(Stylesheet::parse(css)), ..Default::default() };
+        let doc = render_html(r#"<span class="eng title">English:</span><div style="text-align:left">x</div>"#, &opts);
+        let p = para(&doc, 0);
+        assert_eq!(p[0].style.fg, Some(Color(0x99, 0x99, 0x99)));
+        assert!(p[0].style.dim);
+        assert!(matches!(doc.blocks[0], Block::Para { align: Align::Center, .. }));
+        assert!(matches!(doc.blocks[1], Block::Para { align: Align::Left, .. }));
+        // `.card { color: black }` must not paint text black on a dark terminal.
+        let doc = render_html("plain", &opts);
+        assert_eq!(para(&doc, 0)[0].style.fg, None);
+    }
+
+    #[test]
+    fn hints_type_answer_and_mathjax() {
+        let html = r##"<a class=hint href="#">Phonetics</a><div id="hint1" class=hint style="display: none">jal</div>[[type:Back]] and \(x^2\)"##;
+        let doc = render_html(html, &Options::default());
+        let t = doc.plain_text();
+        assert!(t.contains("Phonetics") && !t.contains("jal"), "{t}");
+        assert!(t.contains("[type the answer]"));
+        assert!(t.contains("x^2") && !t.contains("\\("));
+        let doc = render_html(html, &Options { reveal_hints: true, ..Default::default() });
+        let t = doc.plain_text();
+        assert!(!t.contains("Phonetics") && t.contains("jal"), "{t}");
     }
 
     #[test]
