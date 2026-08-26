@@ -1,0 +1,30 @@
+# Maintainer: Kaden Thompson <kadenthomp36@gmail.com>
+# Binary package from the GitHub release. Regenerate checksums with
+# scripts/update-packaging.sh <version>.
+pkgname=ankh-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="A neovim-flavoured Anki client for the terminal (real rslib engine, AnkiWeb sync, Lua config)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/KadenThomp36/ankh"
+license=('AGPL-3.0-or-later')
+depends=('dbus')
+optdepends=('mpv: card audio' 'neovim: note editing')
+provides=('ankh')
+conflicts=('ankh')
+source_x86_64=("$url/releases/download/v$pkgver/ankh-$pkgver-x86_64-unknown-linux-gnu.tar.gz")
+source_aarch64=("$url/releases/download/v$pkgver/ankh-$pkgver-aarch64-unknown-linux-gnu.tar.gz")
+sha256sums_x86_64=('SKIP')
+sha256sums_aarch64=('SKIP')
+
+package() {
+  cd "ankh-$pkgver-"*
+  install -Dm755 ankh "$pkgdir/usr/bin/ankh"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -d "$pkgdir/usr/share/nvim/site/pack/ankh/start/ankh"
+  cp -r contrib/nvim/* "$pkgdir/usr/share/nvim/site/pack/ankh/start/ankh/"
+  ./ankh completions bash > ankh.bash && install -Dm644 ankh.bash "$pkgdir/usr/share/bash-completion/completions/ankh"
+  ./ankh completions zsh > _ankh && install -Dm644 _ankh "$pkgdir/usr/share/zsh/site-functions/_ankh"
+  ./ankh completions fish > ankh.fish && install -Dm644 ankh.fish "$pkgdir/usr/share/fish/vendor_completions.d/ankh.fish"
+}

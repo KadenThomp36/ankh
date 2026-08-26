@@ -41,6 +41,8 @@ tar xzf ankh-*.tar.gz && install -m755 ankh-*/ankh ~/.local/bin/
 ankh completions zsh > ~/.zfunc/_ankh      # bash · zsh · fish · elvish · powershell
 ```
 
+Arch: `packaging/aur/PKGBUILD` (`ankh-bin`). Homebrew: `packaging/homebrew/ankh.rb`.
+
 From source (needs a stable Rust toolchain, `protoc`, `pkg-config`, and
 `libdbus-1-dev` on Linux):
 
