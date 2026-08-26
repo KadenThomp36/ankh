@@ -11,7 +11,10 @@ anything non-trivial.
 - `crates/ankh-render` — HTML → `Document` (blocks/spans with a CSS subset,
   ruby, images) → width-aware wrapped `Line`s. Pure, heavily unit-tested; no
   terminal types. Snapshot-friendly.
-- `crates/ankh` — the binary. `cli/` (headless commands, `--format`), `tui/`
+- `ankh-core::markdown` / `notefile` / `notes` — note file format (ADR 0005).
+  `markdown::html_to_md` must stay lossless-or-raw; add a test for every new
+  HTML construct you decide to support.
+- `crates/ankh` — the binary. `editor.rs` is the `$EDITOR` handoff. `cli/` (headless commands, `--format`), `tui/`
   (ratatui app: `app.rs` loop, `keys.rs` notation + trie, `theme.rs`,
   `banner.rs`, `views/`).
 

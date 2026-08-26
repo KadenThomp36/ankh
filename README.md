@@ -26,7 +26,7 @@ Early. Milestones, in order:
 - [x] **2 · review** — the study screen: question/answer, four ratings with FSRS intervals, undo, bury/suspend/flag/mark, audio autoplay (mpv), `ankh next` / `ankh answer`
 - [x] **3 · rendering** — notetype CSS (classes, alignment, size→weight), Unicode/CJK wrapping, `<ruby>`, inline images (Kitty/Sixel/iTerm2/half-blocks), hints (`H`), type-answer and MathJax placeholders, theme-safe colours
 - [x] **4 · browser** — Anki search syntax, sortable table, question/answer preview, card info + review log, visual-mode bulk ops (suspend/bury/flag/mark/tag/move/due/forget/delete), `ankh search` / `ankh card` / `ankh bulk`
-- [ ] **5 · editor** — notes as Markdown in `$EDITOR`, batch add, git-able deck export
+- [x] **5 · editor** — notes as Markdown + frontmatter in `$EDITOR` (lossless: un-round-trippable HTML stays raw), batch add, `ankh export`/`import` for git-able decks, nvim ftplugin
 - [ ] **6 · Lua** — `init.lua`, keymaps, events, plugins
 - [ ] **7 · management** — deck options/FSRS, stats, import/export
 - [ ] **8 · polish** — `:help`, themes, release binaries
@@ -65,7 +65,15 @@ flips the preview, `I` card info, `v` starts a visual range, then `!` `-` `*`
 ankh search 'deck:Korean is:due' --sort due --format jsonl | jq .sort_field
 ankh card 1633756077720
 ankh bulk 'tag:leech prop:lapses>10' --suspend
+ankh add -d Inbox "front" "back"          # or just `ankh add` to open $EDITOR
+ankh edit 1633756077719                   # note as Markdown in $EDITOR
+ankh export 'deck:Korean::Mining' -o mining.md && git add mining.md
+ankh import mining.md                     # ids update, new entries add
 ```
+
+Editing: `e` in the browser or `<Space>e` while reviewing opens the note in
+`$EDITOR`; `a` adds a note to the current deck. See `docs/adr/0005-note-files.md`
+for the file format and `contrib/nvim` for the ftplugin.
 
 ## Design
 

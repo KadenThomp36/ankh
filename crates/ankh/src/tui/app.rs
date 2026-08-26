@@ -81,6 +81,14 @@ pub enum Action {
     CycleSort,
     ReverseSort,
     StudyCard,
+    EditNote,
+    AddNote,
+}
+
+/// Something to do with the terminal released (run `$EDITOR`).
+enum EditRequest {
+    Existing { note_id: i64 },
+    New { deck: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -179,6 +187,7 @@ pub struct App {
     show_help: bool,
     should_quit: bool,
     tick: u64,
+    edit_request: Option<EditRequest>,
 }
 
 const TIMEOUTLEN: Duration = Duration::from_millis(1000);
@@ -211,6 +220,7 @@ impl App {
             show_help: false,
             should_quit: false,
             tick: 0,
+            edit_request: None,
         };
         app.refresh();
         if !app.audio.available() {
@@ -228,6 +238,17 @@ impl App {
             self.info("not logged in — run `ankh login` in a shell to enable sync");
         }
         while !self.should_quit {
+            if let Some(req) = self.edit_request.take() {
+                // Give the terminal to the editor, then take it back.
+                ratatui::restore();
+                self.audio.stop();
+                let outcome = self.run_editor(req);
+                terminal = ratatui::init();
+                match outcome {
+                    Ok(msg) => self.info(msg),
+                    Err(e) => self.error(e),
+                }
+            }
             terminal.draw(|f| self.draw(f))?;
             if event::poll(Duration::from_millis(50))? {
                 match event::read()? {
@@ -322,6 +343,64 @@ impl App {
             if quit_after {
                 self.should_quit = true;
             }
+        }
+    }
+
+    fn run_editor(&mut self, req: EditRequest) -> std::result::Result<String, String> {
+        use crate::editor;
+        match req {
+            EditRequest::Existing { note_id } => {
+                let doc = self.engine.note_doc(note_id).map_err(|e| e.to_string())?;
+                let text = ankh_core::notefile::write(&[doc]);
+                let Some(edited) = editor::edit_text(&text, &format!("note-{note_id}")).map_err(|e| e.to_string())?
+                else {
+                    return Ok("no changes".into());
+                };
+                let r = editor::save_note_file(&mut self.engine, &edited).map_err(|e| e.to_string())?;
+                self.after_edit();
+                Ok(format!("saved note {note_id}{}", if r.updated == 1 { "" } else { " (+ more)" }))
+            }
+            EditRequest::New { deck } => {
+                let text = editor::new_note_template(&mut self.engine, None, &deck).map_err(|e| e.to_string())?;
+                let Some(edited) = editor::edit_text(&text, "new").map_err(|e| e.to_string())? else {
+                    return Ok("cancelled".into());
+                };
+                let body = editor::strip_leading_comments(&edited);
+                if editor::is_blank(&body) {
+                    return Ok("cancelled (empty note)".into());
+                }
+                let r = editor::save_note_file(&mut self.engine, &body).map_err(|e| e.to_string())?;
+                self.after_edit();
+                Ok(format!("added {} note{}", r.added, plural(r.added)))
+            }
+        }
+    }
+
+    /// Refresh whatever view is showing after a note changed.
+    fn after_edit(&mut self) {
+        match self.view {
+            View::Review => {
+                // Re-render the current card with its new content.
+                if let Some(rv) = self.review.as_mut() {
+                    if let Some(card) = rv.card.clone() {
+                        if let Ok(Some(fresh)) = self.engine.next_card() {
+                            if fresh.card_id == card.card_id {
+                                let shown = rv.answer_shown();
+                                rv.show_card(fresh);
+                                if shown {
+                                    rv.show_answer();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            View::Browser => {
+                if let Some(b) = self.browser.as_mut() {
+                    b.refresh(&mut self.engine);
+                }
+            }
+            View::Decks => self.refresh(),
         }
     }
 
@@ -739,6 +818,8 @@ impl App {
             ("delete", _) => self.dispatch(Action::ConfirmDelete),
             ("forget", _) => self.dispatch(Action::ConfirmForget),
             ("info", _) => self.dispatch(Action::CardInfo),
+            ("edit" | "e", _) => self.dispatch(Action::EditNote),
+            ("add" | "a", _) => self.dispatch(Action::AddNote),
             _ => self.error(format!("not a command: {cmd}")),
         }
     }
@@ -1079,6 +1160,26 @@ impl App {
                     b.toggle_reverse(&mut self.engine);
                 }
             }
+            Action::EditNote => {
+                let note_id = match self.view {
+                    View::Review => self.review.as_ref().and_then(|r| r.card.as_ref().map(|c| c.note_id)),
+                    View::Browser => self.browser.as_ref().and_then(|b| b.current().map(|r| r.note_id)),
+                    View::Decks => None,
+                };
+                match note_id {
+                    Some(id) => self.edit_request = Some(EditRequest::Existing { note_id: id }),
+                    None => self.info("nothing to edit here"),
+                }
+            }
+            Action::AddNote => {
+                let deck = match self.view {
+                    View::Decks => self.decks.selected_deck().map(|d| d.full_name.clone()),
+                    View::Review => self.review.as_ref().map(|r| r.deck_name.clone()),
+                    View::Browser => self.browser.as_ref().and_then(|b| b.current().map(|r| r.deck.clone())),
+                }
+                .unwrap_or_else(|| "Default".into());
+                self.edit_request = Some(EditRequest::New { deck });
+            }
             Action::StudyCard => {
                 // Open the current row's deck in review.
                 let Some(row) = self.browser.as_ref().and_then(|b| b.current().cloned()) else { return };
@@ -1357,6 +1458,7 @@ fn default_keymaps() -> HashMap<View, Keymap<Action>> {
     decks
         .bind("/", Action::BrowseDeck, "browse this deck")
         .bind("b", Action::OpenBrowser, "browser")
+        .bind("a", Action::AddNote, "add note to deck")
         .bind("<C-d>", Action::HalfDown, "half page down")
         .bind("<C-u>", Action::HalfUp, "half page up")
         .bind("l", Action::Expand, "expand")
@@ -1385,6 +1487,8 @@ fn default_keymaps() -> HashMap<View, Keymap<Action>> {
         .bind("H", Action::ToggleHints, "reveal / hide hints")
         .bind("i", Action::CardInfo, "card info")
         .bind("/", Action::BrowseDeck, "browse this deck")
+        .bind("<leader>e", Action::EditNote, "edit note in $EDITOR")
+        .bind("<leader>a", Action::AddNote, "add note to deck")
         .bind("U", Action::Unbury, "unbury deck")
         .bind("<BS>", Action::Back, "back to decks")
         .bind("<C-d>", Action::ScrollDown, "scroll down")
@@ -1413,6 +1517,8 @@ fn default_keymaps() -> HashMap<View, Keymap<Action>> {
         .bind("<Tab>", Action::FlipPreview, "preview question / answer")
         .bind("<CR>", Action::StudyCard, "study this card's deck")
         .bind("I", Action::CardInfo, "card info")
+        .bind("e", Action::EditNote, "edit note in $EDITOR")
+        .bind("a", Action::AddNote, "add note")
         .bind("!", Action::ToggleSuspend, "suspend / unsuspend")
         .bind("-", Action::BulkBury, "bury")
         .bind("*", Action::BulkMark, "mark / unmark")

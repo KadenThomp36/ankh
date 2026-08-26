@@ -1,4 +1,5 @@
 mod cli;
+mod editor;
 mod tui;
 
 use std::path::PathBuf;
@@ -118,6 +119,37 @@ pub enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Print a note as an ankh note file (Markdown + frontmatter)
+    Note { note_id: i64 },
+    /// Edit a note in $EDITOR
+    Edit { note_id: i64 },
+    /// Add notes: from fields on the command line, a note file, or $EDITOR
+    Add {
+        /// Field values in notetype order (omit to open $EDITOR)
+        fields: Vec<String>,
+        #[arg(long, short)]
+        deck: Option<String>,
+        #[arg(long, short)]
+        notetype: Option<String>,
+        /// Space-separated tags
+        #[arg(long, short)]
+        tags: Option<String>,
+        /// Read a note file (`-` for stdin)
+        #[arg(long, short, value_name = "PATH")]
+        file: Option<String>,
+    },
+    /// Export matching notes as a note file (git-able Markdown)
+    Export {
+        /// Anki search; default: everything
+        query: Vec<String>,
+        /// Write to a file instead of stdout
+        #[arg(long, short, value_name = "PATH")]
+        out: Option<PathBuf>,
+    },
+    /// Import a note file: notes with `note:` ids are updated, others added
+    Import { path: PathBuf },
+    /// List notetypes and their fields
+    Notetypes,
     /// Answer a card previously shown by `next`
     Answer {
         card_id: i64,

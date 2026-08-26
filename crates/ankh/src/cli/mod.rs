@@ -55,6 +55,12 @@ fn dispatch(cmd: Command, paths: Paths, out: &Out) -> Result<()> {
         Command::Decks => decks(paths, out),
         Command::Next { deck } => next(paths, deck, out),
         Command::Search { query, sort, reverse, limit } => search(paths, &query.join(" "), &sort, reverse, limit, out),
+        Command::Note { note_id } => note(paths, note_id, out),
+        Command::Edit { note_id } => edit(paths, note_id, out),
+        Command::Add { fields, deck, notetype, tags, file } => add(paths, fields, deck, notetype, tags, file, out),
+        Command::Export { query, out: path } => export(paths, &query.join(" "), path, out),
+        Command::Import { path } => import(paths, &path, out),
+        Command::Notetypes => notetypes(paths, out),
         Command::Card { card_id } => card(paths, card_id, out),
         Command::Bulk { query, suspend, unsuspend, bury, flag, tag, untag, move_to, forget, due, delete, yes } => {
             let op = if suspend {
@@ -435,5 +441,176 @@ fn bulk(paths: Paths, query: &str, op: BulkOp, out: &Out) -> Result<()> {
     };
     eng.close()?;
     out.ok(&msg, serde_json::json!({ "matched": n, "result": msg }));
+    Ok(())
+}
+
+fn note(paths: Paths, note_id: i64, out: &Out) -> Result<()> {
+    let mut eng = Engine::open(paths)?;
+    let doc = eng.note_doc(note_id)?;
+    let data = eng.note(note_id)?;
+    eng.close()?;
+    out.ok(&ankh_core::notefile::write(&[doc]), serde_json::to_value(&data).unwrap());
+    Ok(())
+}
+
+fn edit(paths: Paths, note_id: i64, out: &Out) -> Result<()> {
+    let mut eng = Engine::open(paths)?;
+    let doc = eng.note_doc(note_id)?;
+    let text = ankh_core::notefile::write(&[doc]);
+    let Some(edited) = crate::editor::edit_text(&text, &format!("note-{note_id}"))? else {
+        out.ok("no changes", serde_json::json!({ "note_id": note_id, "changed": false }));
+        return Ok(());
+    };
+    let r = crate::editor::save_note_file(&mut eng, &edited)?;
+    eng.close()?;
+    out.ok(
+        &format!("saved note {note_id}"),
+        serde_json::json!({ "note_id": note_id, "changed": true, "updated": r.updated, "added": r.added }),
+    );
+    Ok(())
+}
+
+fn add(
+    paths: Paths,
+    fields: Vec<String>,
+    deck: Option<String>,
+    notetype: Option<String>,
+    tags: Option<String>,
+    file: Option<String>,
+    out: &Out,
+) -> Result<()> {
+    let mut eng = Engine::open(paths)?;
+    let deck_name = match deck {
+        Some(d) => d,
+        None => eng.current_deck()?.1,
+    };
+    let report = if let Some(f) = file {
+        let text = if f == "-" {
+            let mut s = String::new();
+            std::io::stdin().read_to_string(&mut s)?;
+            s
+        } else {
+            std::fs::read_to_string(&f)?
+        };
+        crate::editor::save_note_file(&mut eng, &text)?
+    } else if fields.is_empty() {
+        if !std::io::stdin().is_terminal() {
+            return Err(anyhow::anyhow!(
+                "no fields given and stdin is not a terminal; use --file - to read a note file"
+            )
+            .into());
+        }
+        let text = crate::editor::new_note_template(&mut eng, notetype.as_deref(), &deck_name)?;
+        let Some(edited) = crate::editor::edit_text(&text, "new")? else {
+            out.ok("cancelled", serde_json::json!({ "added": 0 }));
+            return Ok(());
+        };
+        let body = crate::editor::strip_leading_comments(&edited);
+        if crate::editor::is_blank(&body) {
+            out.ok("cancelled (empty note)", serde_json::json!({ "added": 0 }));
+            return Ok(());
+        }
+        crate::editor::save_note_file(&mut eng, &body)?
+    } else {
+        let nt = match notetype {
+            Some(n) => n,
+            None => eng.default_notetype()?,
+        };
+        let names = eng.field_names(&nt)?.ok_or_else(|| anyhow::anyhow!("unknown notetype {nt:?}"))?;
+        if fields.len() > names.len() {
+            return Err(anyhow::anyhow!(
+                "{nt} has {} fields ({}), got {}",
+                names.len(),
+                names.join(", "),
+                fields.len()
+            )
+            .into());
+        }
+        let doc = ankh_core::NoteDoc {
+            id: None,
+            notetype: nt,
+            deck: deck_name,
+            tags: tags.map(|t| t.split_whitespace().map(String::from).collect()).unwrap_or_default(),
+            fields: names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (n.clone(), fields.get(i).cloned().unwrap_or_default()))
+                .collect(),
+        };
+        let (id, _) = eng.save_note(&doc)?;
+        crate::editor::SaveReport { added: 1, updated: 0, ids: vec![id] }
+    };
+    eng.close()?;
+    out.ok(
+        &format!(
+            "added {} note{}{}",
+            report.added,
+            if report.added == 1 { "" } else { "s" },
+            if report.updated > 0 { format!(", updated {}", report.updated) } else { String::new() }
+        ),
+        serde_json::json!({ "added": report.added, "updated": report.updated, "note_ids": report.ids }),
+    );
+    Ok(())
+}
+
+fn export(paths: Paths, query: &str, path: Option<std::path::PathBuf>, out: &Out) -> Result<()> {
+    let mut eng = Engine::open(paths)?;
+    let cids = eng.search(query, ankh_core::SortBy::Created, false)?;
+    let nids = eng.note_ids_for_cards(&cids)?;
+    let mut docs = Vec::with_capacity(nids.len());
+    for nid in &nids {
+        docs.push(eng.note_doc(*nid)?);
+    }
+    eng.close()?;
+    let text = ankh_core::notefile::write(&docs);
+    match path {
+        Some(p) => {
+            std::fs::write(&p, &text)?;
+            out.ok(
+                &format!("exported {} notes to {}", docs.len(), p.display()),
+                serde_json::json!({ "notes": docs.len(), "path": p }),
+            );
+        }
+        None => match out.format() {
+            Format::Table => print!("{text}"),
+            _ => out.ok("", serde_json::json!({ "notes": docs })),
+        },
+    }
+    Ok(())
+}
+
+fn import(paths: Paths, path: &std::path::Path, out: &Out) -> Result<()> {
+    let text = std::fs::read_to_string(path)?;
+    let mut eng = Engine::open(paths)?;
+    let r = crate::editor::save_note_file(&mut eng, &text)?;
+    eng.close()?;
+    out.ok(
+        &format!("added {}, updated {}", r.added, r.updated),
+        serde_json::json!({ "added": r.added, "updated": r.updated, "note_ids": r.ids }),
+    );
+    Ok(())
+}
+
+fn notetypes(paths: Paths, out: &Out) -> Result<()> {
+    let mut eng = Engine::open(paths)?;
+    let nts = eng.notetypes()?;
+    eng.close()?;
+    let rows = nts
+        .iter()
+        .map(|n| {
+            vec![
+                n.name.clone(),
+                n.notes.to_string(),
+                if n.cloze { "cloze".into() } else { String::new() },
+                n.fields.join(", "),
+            ]
+        })
+        .collect();
+    out.table(
+        &["notetype", "notes", "kind", "fields"],
+        rows,
+        || serde_json::to_value(&nts).unwrap(),
+        || nts.iter().map(|n| serde_json::to_value(n).unwrap()).collect(),
+    );
     Ok(())
 }
