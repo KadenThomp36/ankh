@@ -8,6 +8,9 @@ anything non-trivial.
 - `crates/ankh-core` — the only crate that imports `anki` (rslib). Domain API:
   `Engine`, `Paths`, `AuthStore`, `DeckTree`, sync types. Keep rslib types
   from leaking out of this crate.
+- `crates/ankh-render` — HTML → `Document` (blocks/spans with a CSS subset,
+  ruby, images) → width-aware wrapped `Line`s. Pure, heavily unit-tested; no
+  terminal types. Snapshot-friendly.
 - `crates/ankh` — the binary. `cli/` (headless commands, `--format`), `tui/`
   (ratatui app: `app.rs` loop, `keys.rs` notation + trie, `theme.rs`,
   `banner.rs`, `views/`).
@@ -25,6 +28,14 @@ anything non-trivial.
 - Sync policy: on launch, on quit, on demand. Never periodic. A full-sync
   conflict is always a prompt, except on a pristine (empty) collection where
   download is automatic.
+
+## Testing against real data
+
+`~/.local/share/ankh/dev` is a copy of the `default` profile with **no
+keyring entry**, so `ankh --profile dev` can never sync test answers to
+AnkiWeb. Recreate it with `rm -rf ~/.local/share/ankh/dev && cp -r
+~/.local/share/ankh/default ~/.local/share/ankh/dev`. Never answer cards in
+the `default` profile from tests.
 
 ## Commands
 

@@ -11,9 +11,14 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
+use std::collections::HashMap;
+
+use super::audio::Player;
 use super::keys::{format_seq, Key, Keymap, Match};
 use super::theme::Theme;
 use super::views::decks::DecksView;
+use super::views::review::{ReviewView, Stage};
+use ankh_core::{Av, Rating};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -36,6 +41,27 @@ pub enum Action {
     CommandMode,
     Help,
     ClearMessage,
+    // review
+    ShowAnswer,
+    /// Space/Enter: show the answer, or rate "good" if it's already shown.
+    Continue,
+    Rate(Rating),
+    Undo,
+    Bury,
+    Suspend,
+    ToggleMark,
+    Flag(u8),
+    Replay,
+    Unbury,
+    Back,
+    ScrollDown,
+    ScrollUp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum View {
+    Decks,
+    Review,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,8 +103,11 @@ pub struct App {
     creds: Option<Credentials>,
     theme: Theme,
     mode: Mode,
+    view: View,
     decks: DecksView,
-    keymap: Keymap<Action>,
+    review: Option<ReviewView>,
+    audio: Player,
+    keymaps: HashMap<View, Keymap<Action>>,
     pending: Vec<Key>,
     count: Option<usize>,
     pending_since: Option<Instant>,
@@ -104,8 +133,11 @@ impl App {
             creds,
             theme: Theme::tokyonight(),
             mode: Mode::Normal,
+            view: View::Decks,
             decks: DecksView::default(),
-            keymap: default_keymap(),
+            review: None,
+            audio: Player::new(),
+            keymaps: default_keymaps(),
             pending: Vec::new(),
             count: None,
             pending_since: None,
@@ -119,6 +151,9 @@ impl App {
             tick: 0,
         };
         app.refresh();
+        if !app.audio.available() {
+            app.info("no audio player found — install mpv for card audio");
+        }
         Ok(app)
     }
 
@@ -227,6 +262,110 @@ impl App {
         }
     }
 
+    fn keymap(&self) -> &Keymap<Action> {
+        &self.keymaps[&self.view]
+    }
+
+    // ----- review flow -------------------------------------------------------
+
+    fn open_deck(&mut self) {
+        let Some(d) = self.decks.selected_deck() else { return };
+        let (id, name) = (d.id, d.full_name.clone());
+        if let Err(e) = self.engine.select_deck(id) {
+            self.error(e.to_string());
+            return;
+        }
+        let mut rv = ReviewView::new(name);
+        rv.session_started = Instant::now();
+        self.review = Some(rv);
+        self.view = View::Review;
+        self.advance();
+    }
+
+    /// Load the next card (or the "done" screen) into the review view.
+    fn advance(&mut self) {
+        match self.engine.next_card() {
+            Ok(Some(card)) => {
+                let av = card.question_av.clone();
+                if let Some(rv) = self.review.as_mut() {
+                    rv.show_card(card);
+                }
+                self.play(&av);
+            }
+            Ok(None) => {
+                self.audio.stop();
+                match self.engine.congrats() {
+                    Ok(c) => {
+                        if let Some(rv) = self.review.as_mut() {
+                            rv.finish(c);
+                        }
+                    }
+                    Err(e) => self.error(e.to_string()),
+                }
+            }
+            Err(e) => self.error(e.to_string()),
+        }
+    }
+
+    fn play(&mut self, av: &[Av]) {
+        let files: Vec<_> = av
+            .iter()
+            .filter_map(|a| match a {
+                Av::File { name } => Some(self.engine.media_path(name)),
+                Av::Tts { .. } => None,
+            })
+            .collect();
+        if !files.is_empty() {
+            self.audio.play(&files);
+        }
+    }
+
+    fn show_answer(&mut self) {
+        let Some(rv) = self.review.as_mut() else { return };
+        if rv.answer_shown() {
+            return;
+        }
+        rv.show_answer();
+        let av = rv.card.as_ref().map(|c| c.answer_av.clone()).unwrap_or_default();
+        self.play(&av);
+    }
+
+    fn rate(&mut self, rating: Rating) {
+        let Some(rv) = self.review.as_mut() else { return };
+        if !rv.answer_shown() {
+            return;
+        }
+        let Some(card) = rv.card.clone() else { return };
+        let taken = rv.millis_taken();
+        match self.engine.answer(&card, rating, taken) {
+            Ok(()) => {
+                if let Some(rv) = self.review.as_mut() {
+                    rv.reviewed += 1;
+                }
+                self.advance();
+            }
+            Err(e) => self.error(e.to_string()),
+        }
+    }
+
+    fn with_current_card(&mut self, f: impl FnOnce(&mut Self, &ankh_core::ReviewCard) -> Result<String>) {
+        let Some(card) = self.review.as_ref().and_then(|r| r.card.clone()) else { return };
+        match f(self, &card) {
+            Ok(msg) => {
+                self.info(msg);
+                self.advance();
+            }
+            Err(e) => self.error(e.to_string()),
+        }
+    }
+
+    fn leave_review(&mut self) {
+        self.audio.stop();
+        self.review = None;
+        self.view = View::Decks;
+        self.refresh();
+    }
+
     // ----- input -------------------------------------------------------------
 
     fn on_key(&mut self, key: Key) {
@@ -254,7 +393,8 @@ impl App {
 
     fn on_key_normal(&mut self, key: Key) {
         // Count prefix: digits before a sequence (but `0` alone is a motion).
-        if self.pending.is_empty() {
+        // The review view binds digits to ratings, so no counts there.
+        if self.pending.is_empty() && self.view != View::Review {
             if let KeyCode::Char(c @ '0'..='9') = key.code {
                 if key.mods.is_empty() && !(c == '0' && self.count.is_none()) {
                     let d = c.to_digit(10).unwrap() as usize;
@@ -271,7 +411,7 @@ impl App {
         }
         self.pending.push(key);
         self.pending_since = Some(Instant::now());
-        match self.keymap.lookup(&self.pending) {
+        match self.keymap().lookup(&self.pending) {
             Match::Exact(b) => {
                 let action = b.action;
                 self.pending.clear();
@@ -324,6 +464,23 @@ impl App {
             ("sync", Some("upload" | "up" | "push")) => self.dispatch(Action::SyncUpload),
             ("refresh" | "r", _) => self.dispatch(Action::Refresh),
             ("help" | "h", _) => self.dispatch(Action::Help),
+            ("undo" | "u", _) => self.dispatch(Action::Undo),
+            ("bury", _) => self.dispatch(Action::Bury),
+            ("suspend", _) => self.dispatch(Action::Suspend),
+            ("unbury", _) => self.dispatch(Action::Unbury),
+            ("flag", Some(n)) => match n.parse::<u8>() {
+                Ok(n) if n <= 7 => self.dispatch(Action::Flag(n)),
+                _ => self.error("usage: :flag 0-7"),
+            },
+            ("audio", Some("off")) => {
+                self.audio.enabled = false;
+                self.audio.stop();
+                self.info("audio off");
+            }
+            ("audio", Some("on")) => {
+                self.audio.enabled = true;
+                self.info("audio on");
+            }
             _ => self.error(format!("not a command: {cmd}")),
         }
     }
@@ -331,6 +488,10 @@ impl App {
     fn dispatch(&mut self, action: Action) {
         match action {
             Action::Quit => {
+                if self.view == View::Review {
+                    self.leave_review();
+                    return;
+                }
                 if self.creds.is_some() && self.sync.is_none() {
                     self.start_sync(SyncOp::Normal, true);
                 } else if self.sync.is_some() {
@@ -340,19 +501,131 @@ impl App {
                 }
             }
             Action::ForceQuit => self.should_quit = true,
-            Action::Down => self.decks.move_by(1),
-            Action::Up => self.decks.move_by(-1),
-            Action::Top => self.decks.go_top(),
-            Action::Bottom => self.decks.go_bottom(),
+            Action::Down => match self.view {
+                View::Decks => self.decks.move_by(1),
+                View::Review => self.dispatch(Action::ScrollDown),
+            },
+            Action::Up => match self.view {
+                View::Decks => self.decks.move_by(-1),
+                View::Review => self.dispatch(Action::ScrollUp),
+            },
+            Action::Top => match self.view {
+                View::Decks => self.decks.go_top(),
+                View::Review => {
+                    if let Some(r) = self.review.as_mut() {
+                        r.scroll = 0;
+                    }
+                }
+            },
+            Action::Bottom => match self.view {
+                View::Decks => self.decks.go_bottom(),
+                View::Review => {
+                    if let Some(r) = self.review.as_mut() {
+                        r.scroll = u16::MAX / 2;
+                    }
+                }
+            },
             Action::HalfDown => self.decks.move_by(10),
             Action::HalfUp => self.decks.move_by(-10),
             Action::Expand => self.decks.expand(),
             Action::Collapse => self.decks.collapse(),
             Action::ToggleFold => self.decks.toggle_fold(),
-            Action::Open => {
-                if let Some(d) = self.decks.selected_deck() {
-                    let name = d.full_name.clone();
-                    self.info(format!("review of “{name}” lands in the next milestone"));
+            Action::Open => self.open_deck(),
+            Action::ShowAnswer => self.show_answer(),
+            Action::Continue => {
+                let shown = self.review.as_ref().map(|r| r.answer_shown()).unwrap_or(false);
+                if shown {
+                    self.rate(Rating::Good);
+                } else {
+                    self.show_answer();
+                }
+            }
+            Action::Rate(r) => {
+                let shown = self.review.as_ref().map(|r| r.answer_shown()).unwrap_or(false);
+                if shown {
+                    self.rate(r);
+                } else {
+                    self.show_answer();
+                }
+            }
+            Action::Undo => match self.engine.undo() {
+                Ok(Some(what)) => {
+                    self.info(format!("undid: {what}"));
+                    if self.view == View::Review {
+                        self.advance();
+                    } else {
+                        self.refresh();
+                    }
+                }
+                Ok(None) => self.info("nothing to undo"),
+                Err(e) => self.error(e.to_string()),
+            },
+            Action::Bury => self.with_current_card(|app, c| {
+                app.engine.bury(c.card_id)?;
+                Ok("card buried".into())
+            }),
+            Action::Suspend => self.with_current_card(|app, c| {
+                app.engine.suspend(c.card_id)?;
+                Ok("card suspended".into())
+            }),
+            Action::Flag(n) => {
+                let Some(card) = self.review.as_ref().and_then(|r| r.card.clone()) else { return };
+                let new = if card.flag == n { 0 } else { n };
+                match self.engine.set_flag(card.card_id, new) {
+                    Ok(()) => {
+                        if let Some(c) = self.review.as_mut().and_then(|r| r.card.as_mut()) {
+                            c.flag = new;
+                        }
+                    }
+                    Err(e) => self.error(e.to_string()),
+                }
+            }
+            Action::ToggleMark => {
+                let Some(card) = self.review.as_ref().and_then(|r| r.card.clone()) else { return };
+                match self.engine.toggle_marked(card.note_id) {
+                    Ok(marked) => {
+                        if let Some(c) = self.review.as_mut().and_then(|r| r.card.as_mut()) {
+                            if marked {
+                                c.tags.push("marked".into());
+                            } else {
+                                c.tags.retain(|t| !t.eq_ignore_ascii_case("marked"));
+                            }
+                        }
+                    }
+                    Err(e) => self.error(e.to_string()),
+                }
+            }
+            Action::Replay => {
+                let Some(rv) = self.review.as_ref() else { return };
+                let av = match (&rv.stage, &rv.card) {
+                    (Stage::Answer, Some(c)) => c.answer_av.clone(),
+                    (_, Some(c)) => c.question_av.clone(),
+                    _ => vec![],
+                };
+                self.play(&av);
+            }
+            Action::Unbury => match self.engine.unbury_current_deck() {
+                Ok(()) => {
+                    self.info("unburied");
+                    if self.view == View::Review {
+                        self.advance();
+                    }
+                }
+                Err(e) => self.error(e.to_string()),
+            },
+            Action::Back => {
+                if self.view == View::Review {
+                    self.leave_review();
+                }
+            }
+            Action::ScrollDown => {
+                if let Some(r) = self.review.as_mut() {
+                    r.scroll_by(1);
+                }
+            }
+            Action::ScrollUp => {
+                if let Some(r) = self.review.as_mut() {
+                    r.scroll_by(-1);
                 }
             }
             Action::Sync => self.start_sync(SyncOp::Normal, false),
@@ -379,11 +652,18 @@ impl App {
         f.render_widget(Block::default().style(theme.base()), area);
         let chunks = Layout::vertical([Constraint::Min(3), Constraint::Length(1), Constraint::Length(1)]).split(area);
 
-        self.decks.draw(f, chunks[0], &theme, self.prompt.is_none());
+        match self.view {
+            View::Decks => self.decks.draw(f, chunks[0], &theme, self.prompt.is_none()),
+            View::Review => {
+                if let Some(r) = self.review.as_mut() {
+                    r.draw(f, chunks[0], &theme);
+                }
+            }
+        }
         self.draw_statusline(f, chunks[1], &theme);
         self.draw_cmdline(f, chunks[2], &theme);
 
-        if let Match::Prefix(next) = self.keymap.lookup(&self.pending) {
+        if let Match::Prefix(next) = self.keymap().lookup(&self.pending) {
             if !self.pending.is_empty() {
                 self.draw_which_key(f, area, &theme, next);
             }
@@ -509,7 +789,7 @@ impl App {
 
     fn draw_help(&self, f: &mut Frame, area: Rect, theme: &Theme) {
         let mut lines: Vec<Line> = self
-            .keymap
+            .keymap()
             .bindings()
             .into_iter()
             .map(|b| {
@@ -520,8 +800,9 @@ impl App {
             })
             .collect();
         lines.push(Line::default());
-        lines.push(Line::from(Span::styled(" :sync [download|upload]  :refresh  :q  :q!", theme.muted())));
-        let rect = centered(area, 48, lines.len() as u16 + 2);
+        lines.push(Line::from(Span::styled(" :sync [download|upload]  :refresh  :undo  :q  :q!", theme.muted())));
+        lines.push(Line::from(Span::styled(" :flag N  :bury  :suspend  :unbury  :audio on|off", theme.muted())));
+        let rect = centered(area, 52, lines.len() as u16 + 2);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(theme.border())
@@ -570,32 +851,70 @@ fn full_sync_prompt(upload_ok: bool, download_ok: bool) -> Prompt {
     }
 }
 
-fn default_keymap() -> Keymap<Action> {
-    let mut k = Keymap::default();
-    k.bind("j", Action::Down, "down")
+fn default_keymaps() -> HashMap<View, Keymap<Action>> {
+    let mut global = Keymap::default();
+    global
+        .bind("j", Action::Down, "down")
         .bind("<Down>", Action::Down, "down")
         .bind("k", Action::Up, "up")
         .bind("<Up>", Action::Up, "up")
-        .bind("gg", Action::Top, "first deck")
-        .bind("G", Action::Bottom, "last deck")
+        .bind("gg", Action::Top, "top")
+        .bind("G", Action::Bottom, "bottom")
+        .bind("S", Action::Sync, "sync")
+        .bind("<leader>ss", Action::Sync, "sync")
+        .bind("<leader>sd", Action::SyncDownload, "sync: full download")
+        .bind("<leader>su", Action::SyncUpload, "sync: full upload")
+        .bind("u", Action::Undo, "undo")
+        .bind(":", Action::CommandMode, "command line")
+        .bind("?", Action::Help, "help")
+        .bind("q", Action::Quit, "quit / back")
+        .bind("ZZ", Action::Quit, "quit (syncs first)")
+        .bind("ZQ", Action::ForceQuit, "quit without syncing")
+        .bind("<Esc>", Action::ClearMessage, "clear message");
+
+    let mut decks = global.clone();
+    decks
         .bind("<C-d>", Action::HalfDown, "half page down")
         .bind("<C-u>", Action::HalfUp, "half page up")
         .bind("l", Action::Expand, "expand")
         .bind("h", Action::Collapse, "collapse / parent")
         .bind("za", Action::ToggleFold, "toggle fold")
         .bind("<CR>", Action::Open, "study deck")
-        .bind("S", Action::Sync, "sync")
-        .bind("<leader>ss", Action::Sync, "sync")
-        .bind("<leader>sd", Action::SyncDownload, "sync: full download")
-        .bind("<leader>su", Action::SyncUpload, "sync: full upload")
-        .bind("R", Action::Refresh, "refresh")
-        .bind(":", Action::CommandMode, "command line")
-        .bind("?", Action::Help, "help")
-        .bind("q", Action::Quit, "quit (syncs first)")
-        .bind("ZZ", Action::Quit, "quit (syncs first)")
-        .bind("ZQ", Action::ForceQuit, "quit without syncing")
-        .bind("<Esc>", Action::ClearMessage, "clear message");
-    k
+        .bind("R", Action::Refresh, "refresh");
+
+    let mut review = global.clone();
+    review
+        .bind("<Space>", Action::Continue, "show answer / good")
+        .bind("<CR>", Action::Continue, "show answer / good")
+        .bind("l", Action::ShowAnswer, "show answer")
+        .bind("1", Action::Rate(Rating::Again), "again")
+        .bind("2", Action::Rate(Rating::Hard), "hard")
+        .bind("3", Action::Rate(Rating::Good), "good")
+        .bind("4", Action::Rate(Rating::Easy), "easy")
+        .bind("a", Action::Rate(Rating::Again), "again")
+        .bind("h", Action::Rate(Rating::Hard), "hard")
+        .bind("g", Action::Rate(Rating::Good), "good")
+        .bind("e", Action::Rate(Rating::Easy), "easy")
+        .bind("-", Action::Bury, "bury card")
+        .bind("!", Action::Suspend, "suspend card")
+        .bind("*", Action::ToggleMark, "mark / unmark note")
+        .bind("r", Action::Replay, "replay audio")
+        .bind("U", Action::Unbury, "unbury deck")
+        .bind("<BS>", Action::Back, "back to decks")
+        .bind("<C-d>", Action::ScrollDown, "scroll down")
+        .bind("<C-u>", Action::ScrollUp, "scroll up")
+        .bind("<leader>0", Action::Flag(0), "clear flag")
+        .bind("<leader>1", Action::Flag(1), "flag red")
+        .bind("<leader>2", Action::Flag(2), "flag orange")
+        .bind("<leader>3", Action::Flag(3), "flag green")
+        .bind("<leader>4", Action::Flag(4), "flag blue")
+        .bind("<leader>5", Action::Flag(5), "flag pink")
+        .bind("<leader>6", Action::Flag(6), "flag turquoise")
+        .bind("<leader>7", Action::Flag(7), "flag purple");
+    // `gg` conflicts with `g` (good); in review `g` wins and top/bottom use G only.
+    review.unbind(&super::keys::parse_seq("gg").unwrap());
+
+    HashMap::from([(View::Decks, decks), (View::Review, review)])
 }
 
 fn centered(area: Rect, w: u16, h: u16) -> Rect {

@@ -10,6 +10,7 @@ pub mod decks;
 pub mod engine;
 pub mod error;
 pub mod paths;
+pub mod review;
 pub mod sync;
 
 pub use auth::{AuthStore, Credentials};
@@ -17,6 +18,7 @@ pub use decks::{DeckId, DeckNode, DeckTree};
 pub use engine::Engine;
 pub use error::{Error, Result};
 pub use paths::Paths;
+pub use review::{Av, Congrats, Counts, QueueKind, Rating, ReviewCard};
 pub use sync::{SyncOptions, SyncOutcome, SyncProgress, SyncReport};
 
 /// Version of the JSON output contract. Bump on any breaking change to the

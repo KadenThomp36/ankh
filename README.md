@@ -23,7 +23,7 @@ Early. Milestones, in order:
 
 - [x] **0 · spike** — rslib as a dependency; login, full sync, media, scheduler
 - [x] **1 · skeleton** — CLI (`login`, `sync`, `decks`, `status`, `--format json`), TUI deck tree, keymaps, which-key, sync overlay
-- [ ] **2 · review** — the study screen
+- [x] **2 · review** — the study screen: question/answer, four ratings with FSRS intervals, undo, bury/suspend/flag/mark, audio autoplay (mpv), `ankh next` / `ankh answer`
 - [ ] **3 · rendering** — Unicode/CJK, `<ruby>`, images (Kitty/sixel), audio
 - [ ] **4 · browser** — Anki search syntax, previews, bulk ops
 - [ ] **5 · editor** — notes as Markdown in `$EDITOR`, batch add, git-able deck export
@@ -49,8 +49,13 @@ ankh                # the TUI
 ankh decks --format json | jq '.data[] | select(.review > 0) | .name'
 ```
 
-Inside the TUI: `j`/`k` move, `h`/`l` fold, `S` sync, `<Space>` opens
-which-key, `:` for the command line, `?` for the full keymap, `q` syncs and quits.
+Inside the TUI: `j`/`k` move, `h`/`l` fold, `Enter` studies a deck, `S` sync,
+`<Space>` opens which-key, `:` for the command line, `?` for the current
+view's keymap, `q` goes back / syncs and quits.
+
+Reviewing: `Space` shows the answer and then rates *good*; `1`–`4` (or
+`a`/`h`/`g`/`e`) rate; `u` undo; `-` bury; `!` suspend; `*` mark; `r` replay
+audio; `<Space>1`…`7` flag.
 
 ## Design
 

@@ -1,0 +1,17 @@
+[package]
+name = "ankh-render"
+description = "Turns Anki card HTML into a styled, wrapped document for terminals"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+scraper = { version = "0.27", default-features = false }
+ego-tree = "0.11"
+unicode-width.workspace = true
+unicode-segmentation.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+insta = "1"

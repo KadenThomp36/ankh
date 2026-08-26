@@ -53,7 +53,71 @@ fn dispatch(cmd: Command, paths: Paths, out: &Out) -> Result<()> {
             sync(paths, op, SyncOptions { media: !no_media }, out)
         }
         Command::Decks => decks(paths, out),
+        Command::Next { deck } => next(paths, deck, out),
+        Command::Answer { card_id, rating, secs } => answer(paths, card_id, &rating, secs, out),
     }
+}
+
+fn find_deck(eng: &mut Engine, name: &str) -> Result<ankh_core::DeckId> {
+    let tree = eng.deck_tree()?;
+    let want = name.to_lowercase();
+    tree.all()
+        .into_iter()
+        .find(|d| d.full_name.to_lowercase() == want || d.name.to_lowercase() == want)
+        .map(|d| d.id)
+        .ok_or_else(|| anyhow::anyhow!("no deck named {name:?}").into())
+}
+
+fn next(paths: Paths, deck: Option<String>, out: &Out) -> Result<()> {
+    let mut eng = Engine::open(paths)?;
+    if let Some(name) = deck {
+        let id = find_deck(&mut eng, &name)?;
+        eng.select_deck(id)?;
+    }
+    let card = eng.next_card()?;
+    eng.close()?;
+    match card {
+        None => out.ok("nothing due", serde_json::json!({ "card": null })),
+        Some(c) => {
+            let opts = ankh_render::Options::default();
+            let q = ankh_render::render_html(&c.question_html, &opts).plain_text();
+            let a = ankh_render::render_html(&c.answer_html, &opts).plain_text();
+            let text = format!(
+                "card {}  [{}]  {} · new {} · learn {} · review {}\n\n{q}\n\n--- answer ---\n{a}\n\n1 again {}   2 hard {}   3 good {}   4 easy {}",
+                c.card_id,
+                match c.kind { ankh_core::QueueKind::New => "new", ankh_core::QueueKind::Learning => "learning", ankh_core::QueueKind::Review => "review" },
+                c.deck_name, c.counts.new, c.counts.learn, c.counts.review,
+                c.buttons[0], c.buttons[1], c.buttons[2], c.buttons[3]
+            );
+            let mut json = serde_json::to_value(&c).unwrap();
+            json["question_text"] = serde_json::Value::String(q);
+            json["answer_text"] = serde_json::Value::String(a);
+            out.ok(&text, serde_json::json!({ "card": json }));
+        }
+    }
+    Ok(())
+}
+
+fn answer(paths: Paths, card_id: i64, rating: &str, secs: u32, out: &Out) -> Result<()> {
+    let rating = match rating.to_lowercase().as_str() {
+        "1" | "again" => ankh_core::Rating::Again,
+        "2" | "hard" => ankh_core::Rating::Hard,
+        "3" | "good" => ankh_core::Rating::Good,
+        "4" | "easy" => ankh_core::Rating::Easy,
+        other => return Err(anyhow::anyhow!("unknown rating {other:?} (again|hard|good|easy|1-4)").into()),
+    };
+    let mut eng = Engine::open(paths)?;
+    // The scheduler needs the states the card was shown with; re-fetch and check it's still next.
+    let card = eng.next_card()?.filter(|c| c.card_id == card_id).ok_or_else(|| {
+        anyhow::anyhow!("card {card_id} is not the next card in the current deck; run `ankh next` first")
+    })?;
+    eng.answer(&card, rating, secs.saturating_mul(1000))?;
+    eng.close()?;
+    out.ok(
+        &format!("answered {card_id}: {}", rating.label()),
+        serde_json::json!({ "card_id": card_id, "rating": rating }),
+    );
+    Ok(())
 }
 
 fn prompt(label: &str) -> std::io::Result<String> {

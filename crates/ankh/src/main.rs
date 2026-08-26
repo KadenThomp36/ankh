@@ -65,6 +65,20 @@ pub enum Command {
     },
     /// List decks with due counts
     Decks,
+    /// Print the next due card of a deck (question, answer, buttons)
+    Next {
+        /// Deck name (`Korean::Vocab`); defaults to the current deck
+        deck: Option<String>,
+    },
+    /// Answer a card previously shown by `next`
+    Answer {
+        card_id: i64,
+        /// again | hard | good | easy, or 1-4
+        rating: String,
+        /// Seconds spent, recorded in the review log
+        #[arg(long, default_value_t = 10)]
+        secs: u32,
+    },
 }
 
 fn main() {

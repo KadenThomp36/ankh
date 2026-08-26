@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 ankh-core = { path = "../ankh-core" }
+ankh-render = { path = "../ankh-render" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

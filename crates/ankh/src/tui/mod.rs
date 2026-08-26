@@ -1,7 +1,9 @@
 //! The full-screen interface. Modal, keyboard-driven, themed.
 
 pub mod app;
+pub mod audio;
 pub mod banner;
+pub mod doc;
 pub mod keys;
 pub mod theme;
 pub mod views;

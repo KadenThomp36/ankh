@@ -191,8 +191,6 @@ impl<A: Clone> Keymap<A> {
         self
     }
 
-    /// Used by the Lua layer (milestone 6) to remove defaults.
-    #[allow(dead_code)]
     pub fn unbind(&mut self, seq: &[Key]) {
         self.bindings.remove(seq);
     }
