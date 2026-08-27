@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Fixed**: sync and network failures printed only `anki: SyncError` /
+  `anki: NetworkError`. `AnkiError`'s `Display` renders the variant name and
+  drops the `kind` and message carried in its source, so a wrong password, an
+  outdated client and a server outage were indistinguishable. They are now
+  unwrapped at the `From<AnkiError>` boundary and read like `sync: AuthFailed:
+  Email or password was incorrect; please try again.`
+- **Fixed**: network errors exited `1`; `docs/cli.md` documents `6` for
+  "sync/network error". They now exit `6`, as the sync errors already did.
+
 ## 0.1.0 — 2026-08-26
 
 First release. Everything below happened in one day, on a real 20k-card
