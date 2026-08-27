@@ -154,6 +154,24 @@ fn convert_av(tags: Vec<anki_proto::card_rendering::AvTag>) -> Vec<Av> {
         .collect()
 }
 
+/// Extract AV tags from both sides of a rendered card.
+///
+/// `{{FrontSide}}` inlines the rendered question — `[sound:…]` tags included —
+/// into the answer, so extracting the answer naively finds the question's
+/// audio again and revealing the answer replays it. pylib avoids this by
+/// rendering the answer against the already-extracted question text; the
+/// non-partial render we use has the raw question spliced in verbatim, so do
+/// the same substitution after the fact: extract the question first, replace
+/// the inlined copy with the extracted text (play markers, no `[sound:…]`),
+/// and only then extract the answer. `answer_av` is then just what the answer
+/// side adds.
+fn extract_sides(q_raw: String, a_raw: String, tr: &anki::prelude::I18n) -> (String, Vec<Av>, String, Vec<Av>) {
+    let (question_html, q_av) = extract_av_tags(q_raw.clone(), true, tr);
+    let a_raw = if q_raw.is_empty() { a_raw } else { a_raw.replacen(&q_raw, &question_html, 1) };
+    let (answer_html, a_av) = extract_av_tags(a_raw, false, tr);
+    (question_html, convert_av(q_av), answer_html, convert_av(a_av))
+}
+
 impl Engine {
     /// Make `deck` the current deck (Anki's notion) so the queue is built for it.
     pub fn select_deck(&mut self, deck: DeckId) -> Result<()> {
@@ -180,8 +198,8 @@ impl Engine {
         let cid = qc.card.id();
         let render = col.render_existing_card(cid, false, false)?;
         let tr = col.tr().clone();
-        let (question_html, q_av) = extract_av_tags(nodes_to_html(&render.qnodes), true, &tr);
-        let (answer_html, a_av) = extract_av_tags(nodes_to_html(&render.anodes), false, &tr);
+        let (question_html, question_av, answer_html, answer_av) =
+            extract_sides(nodes_to_html(&render.qnodes), nodes_to_html(&render.anodes), &tr);
         let buttons = col.describe_next_states(&qc.states)?;
         let mut buttons_arr: [String; 4] = Default::default();
         for (i, b) in buttons.into_iter().take(4).enumerate() {
@@ -212,8 +230,8 @@ impl Engine {
             question_html: replace_play_markers(&question_html),
             answer_html: replace_play_markers(&answer_html),
             css: render.css,
-            question_av: convert_av(q_av),
-            answer_av: convert_av(a_av),
+            question_av,
+            answer_av,
             buttons: buttons_arr,
             counts,
             states: Some(qc.states),
@@ -305,5 +323,56 @@ impl Engine {
     /// Absolute path of a media file referenced by a card.
     pub fn media_path(&self, name: &str) -> std::path::PathBuf {
         self.paths().media_folder().join(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn files(av: &[Av]) -> Vec<&str> {
+        av.iter()
+            .map(|a| match a {
+                Av::File { name } => name.as_str(),
+                Av::Tts { .. } => "tts",
+            })
+            .collect::<Vec<_>>()
+    }
+
+    /// The bug this guards against: with `{{FrontSide}}` on the back, the
+    /// question's audio was extracted into `answer_av` too, so revealing the
+    /// answer replayed it.
+    #[test]
+    fn frontside_audio_is_not_replayed_on_the_answer() {
+        let tr = anki::prelude::I18n::template_only();
+        let q = "안녕[sound:hello.mp3]".to_string();
+        let a = format!("{q}<hr id=answer>annyeong[sound:answer.mp3]");
+        let (q_html, q_av, a_html, a_av) = extract_sides(q, a, &tr);
+        assert_eq!(files(&q_av), ["hello.mp3"]);
+        assert_eq!(files(&a_av), ["answer.mp3"]);
+        // The inlined front keeps its play marker, so the ♪ glyph still shows.
+        assert!(q_html.contains("[anki:play:q:0]"), "{q_html}");
+        assert!(a_html.contains("[anki:play:q:0]"), "{a_html}");
+        assert!(a_html.contains("[anki:play:a:0]"), "{a_html}");
+    }
+
+    /// No `{{FrontSide}}` on the back: nothing to splice, both sides keep
+    /// their own tags.
+    #[test]
+    fn independent_sides_are_untouched() {
+        let tr = anki::prelude::I18n::template_only();
+        let (_, q_av, _, a_av) = extract_sides("q[sound:q.mp3]".into(), "a[sound:a.mp3]".into(), &tr);
+        assert_eq!(files(&q_av), ["q.mp3"]);
+        assert_eq!(files(&a_av), ["a.mp3"]);
+    }
+
+    /// An empty question must not turn the splice into an insert-at-zero.
+    #[test]
+    fn empty_question_is_a_no_op() {
+        let tr = anki::prelude::I18n::template_only();
+        let (_, q_av, a_html, a_av) = extract_sides(String::new(), "a[sound:a.mp3]".into(), &tr);
+        assert!(q_av.is_empty());
+        assert_eq!(files(&a_av), ["a.mp3"]);
+        assert!(a_html.starts_with('a'), "{a_html}");
     }
 }

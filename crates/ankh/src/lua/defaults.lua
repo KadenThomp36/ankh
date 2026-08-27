@@ -29,9 +29,12 @@ function ankh.get(key) return native.get_option(key) end
 
 --- Keymaps ------------------------------------------------------------------
 
---- ankh.keymap.set(view, lhs, rhs, { desc = "..." })
+--- ankh.keymap.set(view, lhs, rhs, { desc = "...", nowait = true })
+--- nowait fires the mapping immediately even when a longer mapping shares
+--- the prefix (which then becomes unreachable) — neovim's <nowait>.
 function ankh.keymap.set(view, lhs, rhs, opts)
-  native.keymap_set(view, lhs, rhs, opts and opts.desc or nil)
+  opts = opts or {}
+  native.keymap_set(view, lhs, rhs, opts.desc, opts.nowait)
 end
 
 --- ankh.keymap.del(view, lhs)
@@ -151,8 +154,12 @@ map("decks", "D", "delete_deck", { desc = "delete deck" })
 map("decks", "<leader>f", "fsrs_optimize", { desc = "optimise FSRS parameters" })
 
 -- review
-map("review", "<Space>", "continue", { desc = "show answer / good" })
-map("review", "<CR>", "continue", { desc = "show answer / good" })
+-- nowait: <Space> is the most-pressed key in the app; revealing the answer
+-- must not sit out `timeoutlen` waiting for a possible <Space>x sequence.
+-- The cost is that <leader> sequences don't exist in review — everything a
+-- leader map does elsewhere has a plain key here (E, A, s, f0-f7).
+map("review", "<Space>", "continue", { desc = "show answer / good", nowait = true })
+map("review", "<CR>", "continue", { desc = "show answer / good", nowait = true })
 map("review", "l", "show_answer", { desc = "show answer" })
 map("review", "1", "rate again", { desc = "again" })
 map("review", "2", "rate hard", { desc = "hard" })
@@ -173,15 +180,19 @@ map("review", "<BS>", "back", { desc = "back to decks" })
 map("review", "<C-d>", "scroll_down", { desc = "scroll down" })
 map("review", "<C-u>", "scroll_up", { desc = "scroll up" })
 map("review", "/", "browse_deck", { desc = "browse this deck" })
-map("review", "<leader>e", "edit_note", { desc = "edit note in $EDITOR" })
-map("review", "<leader>a", "add_note", { desc = "add note to deck" })
-map("review", "<leader>s", "stats", { desc = "stats for deck" })
+map("review", "E", "edit_note", { desc = "edit note in $EDITOR" })
+map("review", "A", "add_note", { desc = "add note to deck" })
+map("review", "s", "stats", { desc = "stats for deck" })
 for n = 0, 7 do
   local names = { "clear flag", "flag red", "flag orange", "flag green", "flag blue", "flag pink", "flag turquoise", "flag purple" }
-  map("review", "<leader>" .. n, "flag " .. n, { desc = names[n + 1] })
+  map("review", "f" .. n, "flag " .. n, { desc = names[n + 1] })
 end
 -- `g` is "good" in review, so no `gg` there.
 ankh.keymap.del("review", "gg")
+-- Shadowed by nowait <Space>; `S` and `:sync download|upload` still work.
+ankh.keymap.del("review", "<leader>ss")
+ankh.keymap.del("review", "<leader>sd")
+ankh.keymap.del("review", "<leader>su")
 
 -- browser
 map("browser", "/", "insert_mode", { desc = "edit search" })

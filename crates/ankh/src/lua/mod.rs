@@ -277,12 +277,13 @@ impl Runtime {
         let st = self.state.clone();
         let engine = self.engine.clone();
 
-        // keymap_set(view, lhs, rhs, desc)
+        // keymap_set(view, lhs, rhs, desc, nowait)
         {
             let st = st.clone();
             t.set(
                 "keymap_set",
-                lua.create_function(move |lua, (view, lhs, rhs, desc): (String, String, Value, Option<String>)| {
+                lua.create_function(
+                    move |lua, (view, lhs, rhs, desc, nowait): (String, String, Value, Option<String>, Option<bool>)| {
                     let seq = parse_seq(&lhs).map_err(mlua::Error::runtime)?;
                     let action = match rhs {
                         Value::String(s) => {
@@ -304,11 +305,17 @@ impl Runtime {
                             )))
                         }
                     };
-                    let mut st = st.borrow_mut();
-                    let desc = desc.unwrap_or_else(|| lhs.clone());
-                    st.keymaps.entry(view.to_ascii_lowercase()).or_default().bind_seq(seq, action, desc);
-                    Ok(())
-                })?,
+                        let mut st = st.borrow_mut();
+                        let desc = desc.unwrap_or_else(|| lhs.clone());
+                        st.keymaps.entry(view.to_ascii_lowercase()).or_default().bind_seq(
+                            seq,
+                            action,
+                            desc,
+                            nowait.unwrap_or(false),
+                        );
+                        Ok(())
+                    },
+                )?,
             )?;
         }
         {

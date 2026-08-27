@@ -5,7 +5,9 @@ ankh is modal. In **normal** mode keys are commands; `:` opens the
 browser starts a **visual** range. `<Esc>` always backs out.
 
 Counts work like neovim: `5j` moves five decks. Sequences wait `timeoutlen`
-for their next key (`<Space>` alone shows the answer; `<Space>e` edits).
+for their next key (`<Space>s` syncs in decks) — except `nowait` mappings,
+which fire immediately: `<Space>` in review shows the answer with no delay,
+so there are no `<Space>` sequences there.
 
 Press `?` in any view for that view's live keymap — it reflects your
 `init.lua`. Everything below is the default.
@@ -31,11 +33,11 @@ Press `?` in any view for that view's live keymap — it reflects your
 
 ## Review
 
-`<Space>` `<CR>` show answer, then *good* · `l` show answer ·
-`1` `2` `3` `4` or `a` `h` `g` `e` rate · `-` bury · `!` suspend ·
-`*` mark · `r` replay audio · `H` reveal hints · `i` card info ·
-`<Space>0`–`7` flag · `<Space>e` edit note · `<Space>a` add note ·
-`<Space>s` stats · `<C-d>` `<C-u>` scroll · `<BS>` back · `U` unbury
+`<Space>` `<CR>` show answer, then *good* (instant — no sequence wait) ·
+`l` show answer · `1` `2` `3` `4` or `a` `h` `g` `e` rate · `-` bury ·
+`!` suspend · `*` mark · `r` replay audio (question + answer on the back) ·
+`H` reveal hints · `i` card info · `f0`–`f7` flag · `E` edit note ·
+`A` add note · `s` stats · `<C-d>` `<C-u>` scroll · `<BS>` back · `U` unbury
 
 ## Browser
 

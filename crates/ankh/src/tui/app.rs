@@ -1072,7 +1072,7 @@ impl App {
         self.pending.push(key);
         self.pending_since = Some(Instant::now());
         let (exact, longer) = match self.keymap().lookup(&self.pending) {
-            Match::Exact(b) => (Some(b.action), self.keymap().has_longer(&self.pending)),
+            Match::Exact(b) => (Some(b.action), !b.nowait && self.keymap().has_longer(&self.pending)),
             Match::Prefix(_) => (None, true),
             Match::None => (None, false),
         };
@@ -1443,7 +1443,13 @@ impl App {
             Action::Replay => {
                 let Some(rv) = self.review.as_ref() else { return };
                 let av = match (&rv.stage, &rv.card) {
-                    (Stage::Answer, Some(c)) => c.answer_av.clone(),
+                    // The desktop replays the question before the answer
+                    // (deck option `replayq`, on by default); match that.
+                    (Stage::Answer, Some(c)) => {
+                        let mut av = c.question_av.clone();
+                        av.extend(c.answer_av.iter().cloned());
+                        av
+                    }
                     (_, Some(c)) => c.question_av.clone(),
                     _ => vec![],
                 };

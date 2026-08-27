@@ -161,6 +161,10 @@ pub struct Binding<A> {
     pub seq: Vec<Key>,
     pub action: A,
     pub desc: String,
+    /// neovim's `nowait`: fire on exact match immediately, without waiting
+    /// `timeoutlen` for a longer binding that shares this prefix. Longer
+    /// bindings become unreachable behind a nowait prefix.
+    pub nowait: bool,
 }
 
 /// Bindings for one (view, mode).
@@ -188,12 +192,12 @@ impl<A: Clone> Keymap<A> {
     #[cfg(test)]
     pub fn bind(&mut self, seq: &str, action: A, desc: impl Into<String>) -> &mut Self {
         let seq = parse_seq(seq).expect("valid default key sequence");
-        self.bindings.insert(seq.clone(), Binding { seq, action, desc: desc.into() });
+        self.bindings.insert(seq.clone(), Binding { seq, action, desc: desc.into(), nowait: false });
         self
     }
 
-    pub fn bind_seq(&mut self, seq: Vec<Key>, action: A, desc: impl Into<String>) -> &mut Self {
-        self.bindings.insert(seq.clone(), Binding { seq, action, desc: desc.into() });
+    pub fn bind_seq(&mut self, seq: Vec<Key>, action: A, desc: impl Into<String>, nowait: bool) -> &mut Self {
+        self.bindings.insert(seq.clone(), Binding { seq, action, desc: desc.into(), nowait });
         self
     }
 
@@ -261,6 +265,16 @@ mod tests {
             let seq = parse_seq(s).unwrap();
             assert_eq!(format_seq(&seq), s);
         }
+    }
+
+    #[test]
+    fn nowait_survives_binding() {
+        let mut km: Keymap<u8> = Keymap::default();
+        km.bind_seq(parse_seq("<Space>").unwrap(), 1, "continue", true);
+        km.bind_seq(parse_seq("<Space>e").unwrap(), 2, "edit", false);
+        let space = parse_seq("<Space>").unwrap();
+        assert!(km.has_longer(&space));
+        assert!(matches!(km.lookup(&space), Match::Exact(b) if b.action == 1 && b.nowait));
     }
 
     #[test]

@@ -26,7 +26,7 @@ ankh.setup({
 ## Keymaps
 
 ```lua
-ankh.keymap.set(view, lhs, rhs, { desc = "shown in which-key and :help" })
+ankh.keymap.set(view, lhs, rhs, { desc = "shown in which-key and :help", nowait = true })
 ankh.keymap.del(view, lhs)
 ```
 

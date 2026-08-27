@@ -39,7 +39,8 @@ anything non-trivial.
   borrow across a call into another `App` method — bind results to a local
   before `match`ing on them.
 - Key sequences: an exact match that is also a prefix of a longer binding
-  waits `timeoutlen` (neovim semantics) — `<Space>` vs `<Space>e`.
+  waits `timeoutlen` (neovim semantics) — unless the binding is `nowait`,
+  which fires immediately and shadows the longer ones (review's `<Space>`).
 - rslib's `progress` module is private — see `ProgressLink` in
   `engine.rs` for the workaround; don't try to name `ProgressState`.
 - Sync policy: on launch, on quit, on demand. Never periodic. A full-sync
