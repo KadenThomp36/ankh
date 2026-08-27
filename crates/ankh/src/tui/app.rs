@@ -349,7 +349,7 @@ pub struct App {
     count: Option<usize>,
     pending_since: Option<Instant>,
     /// An exact match that is waiting in case a longer sequence follows
-    /// (`<Space>` vs `<Space>e` in review); fires on timeout.
+    /// (`<Space>s` stats vs `<Space>ss` sync); fires on timeout.
     pending_exact: Option<Action>,
     cmdline: String,
     message: Option<(Message, Instant)>,

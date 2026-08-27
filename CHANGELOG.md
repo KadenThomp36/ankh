@@ -8,10 +8,11 @@
   the reveal plays only what the answer side adds. `r` (replay) on the back
   still plays question then answer, matching the desktop's `replayq` default.
 - **Fixed**: showing the answer waited `timeoutlen` (1s) because `<Space>`
-  was both `continue` and the leader. Keymaps grew neovim's `nowait`
-  (`ankh.keymap.set(view, lhs, rhs, { nowait = true })`), review's `<Space>`
-  and `<CR>` use it, and review's leader maps moved to plain keys: `E` edit,
-  `A` add, `s` stats, `f0`–`f7` flag.
+  was both `continue` and the leader. `<Space>` is now purely the leader —
+  in review too, where its sequences (edit, add, stats, flags) are back —
+  and the progress key is `<CR>`, as on the desktop. Keymaps also grew
+  neovim's `nowait` (`ankh.keymap.set(view, lhs, rhs, { nowait = true })`
+  for bindings that should fire without waiting on a shared prefix.
 - **Fixed**: sync and network failures printed only `anki: SyncError` /
   `anki: NetworkError`. `AnkiError`'s `Display` renders the variant name and
   drops the `kind` and message carried in its source, so a wrong password, an

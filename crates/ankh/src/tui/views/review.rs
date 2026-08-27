@@ -286,7 +286,7 @@ impl ReviewView {
             Line::from(spans).alignment(Alignment::Center)
         } else {
             Line::from(vec![
-                Span::styled(" Space ", theme.mode_pill("NORMAL")),
+                Span::styled(" Enter ", theme.mode_pill("NORMAL")),
                 Span::styled(" show answer", theme.muted()),
             ])
             .alignment(Alignment::Center)

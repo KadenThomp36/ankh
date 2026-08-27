@@ -40,7 +40,9 @@ anything non-trivial.
   before `match`ing on them.
 - Key sequences: an exact match that is also a prefix of a longer binding
   waits `timeoutlen` (neovim semantics) — unless the binding is `nowait`,
-  which fires immediately and shadows the longer ones (review's `<Space>`).
+  which fires immediately and shadows the longer ones. Never bind bare
+  `<Space>`: it is the leader, and a leader that is also a mapping makes
+  every leader sequence race a timeout.
 - rslib's `progress` module is private — see `ProgressLink` in
   `engine.rs` for the workaround; don't try to name `ProgressState`.
 - Sync policy: on launch, on quit, on demand. Never periodic. A full-sync
